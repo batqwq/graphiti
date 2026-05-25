@@ -1,182 +1,230 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+本文件为 Claude Code (claude.ai/code) 在此仓库中工作时提供指导。
 
-## Project Overview
+---
 
-Graphiti is a Python framework for building temporally-aware knowledge graphs designed for AI agents. It enables real-time incremental updates to knowledge graphs without batch recomputation, making it suitable for dynamic environments.
+## 项目概述
 
-Key features:
+Graphiti 是一个 Python 框架，用于构建面向 AI 代理的**时序感知知识图谱**。它支持对知识图谱进行实时增量更新，无需批量重新计算，适用于动态环境。
 
-- Bi-temporal data model with explicit tracking of event occurrence times
-- Hybrid retrieval combining semantic embeddings, keyword search (BM25), and graph traversal
-- Support for custom entity definitions via Pydantic models
-- Integration with Neo4j and FalkorDB as graph storage backends
-- Optional OpenTelemetry distributed tracing support
+### 核心特性
 
-## Development Commands
+- **双时序数据模型** — 显式跟踪事件发生时间
+- **混合检索** — 结合语义嵌入、关键词搜索 (BM25) 和图遍历
+- **自定义实体** — 通过 Pydantic 模型定义实体
+- **多数据库后端** — 支持 Neo4j 和 FalkorDB
+- **可观测性** — 可选的 OpenTelemetry 分布式追踪
 
-### Main Development Commands (run from project root)
+---
+
+## 开发命令
+
+### 主项目命令（在项目根目录执行）
 
 ```bash
-# Install dependencies
+# 安装依赖
 uv sync --extra dev
 
-# Format code (ruff import sorting + formatting)
+# 格式化代码（ruff 导入排序 + 格式化）
 make format
 
-# Lint code (ruff + pyright type checking)
+# 代码检查（ruff + pyright 类型检查）
 make lint
 
-# Run tests
+# 运行测试
 make test
 
-# Run all checks (format, lint, test)
+# 运行全部检查（格式化、检查、测试）
 make check
 ```
 
-### Server Development (run from server/ directory)
+### Server 开发（在 `server/` 目录执行）
 
 ```bash
 cd server/
-# Install server dependencies
+
+# 安装 Server 依赖
 uv sync --extra dev
 
-# Run server in development mode
+# 以开发模式启动服务
 uvicorn graph_service.main:app --reload
 
-# Format, lint, test server code
+# 格式化、检查、测试
 make format
 make lint
 make test
 ```
 
-### MCP Server Development (run from mcp_server/ directory)
+### MCP Server 开发（在 `mcp_server/` 目录执行）
 
 ```bash
 cd mcp_server/
-# Install MCP server dependencies
+
+# 安装 MCP Server 依赖
 uv sync
 
-# Run with Docker Compose
+# 使用 Docker Compose 启动
 docker-compose up
 ```
 
-## Code Architecture
+---
 
-### Core Library (`graphiti_core/`)
+## 代码架构
 
-- **Main Entry Point**: `graphiti.py` - Contains the main `Graphiti` class that orchestrates all functionality
-- **Graph Storage**: `driver/` - Database drivers for Neo4j and FalkorDB
-- **LLM Integration**: `llm_client/` - Clients for OpenAI, Anthropic, Gemini, Groq
-- **Embeddings**: `embedder/` - Embedding clients for various providers
-- **Graph Elements**: `nodes.py`, `edges.py` - Core graph data structures
-- **Search**: `search/` - Hybrid search implementation with configurable strategies
-- **Prompts**: `prompts/` - LLM prompts for entity extraction, deduplication, summarization
-- **Utilities**: `utils/` - Maintenance operations, bulk processing, datetime handling
+### 核心库 `graphiti_core/`
 
-### Server (`server/`)
+| 模块 | 说明 |
+|---|---|
+| `graphiti.py` | 主入口，包含 `Graphiti` 类，协调所有功能 |
+| `driver/` | 数据库驱动（Neo4j、FalkorDB） |
+| `llm_client/` | LLM 客户端（OpenAI、Anthropic、Gemini、Groq） |
+| `embedder/` | 各提供商的嵌入客户端 |
+| `nodes.py` / `edges.py` | 图的核心数据结构（节点与边） |
+| `search/` | 混合搜索，支持可配置策略 |
+| `prompts/` | LLM 提示词（实体抽取、去重、摘要） |
+| `utils/` | 维护操作、批量处理、日期时间工具 |
 
-- **FastAPI Service**: `graph_service/main.py` - REST API server
-- **Routers**: `routers/` - API endpoints for ingestion and retrieval
-- **DTOs**: `dto/` - Data transfer objects for API contracts
+### REST API 服务 `server/`
 
-### MCP Server (`mcp_server/`)
+| 模块 | 说明 |
+|---|---|
+| `graph_service/main.py` | FastAPI 服务入口 |
+| `routers/` | API 端点（数据摄入与检索） |
+| `dto/` | 数据传输对象（API 契约） |
 
-- **MCP Implementation**: `graphiti_mcp_server.py` - Model Context Protocol server for AI assistants
-- **Docker Support**: Containerized deployment with Neo4j
+### MCP 服务 `mcp_server/`
 
-## Testing
+| 模块 | 说明 |
+|---|---|
+| `graphiti_mcp_server.py` | Model Context Protocol 服务端，供 AI 助手使用 |
+| Docker 支持 | 容器化部署（含 Neo4j） |
 
-- **Unit Tests**: `tests/` - Comprehensive test suite using pytest
-- **Integration Tests**: Tests marked with `_int` suffix require database connections
-- **Evaluation**: `tests/evals/` - End-to-end evaluation scripts
+---
 
-## Configuration
+## 测试
 
-### Environment Variables
+| 类别 | 位置/说明 |
+|---|---|
+| 单元测试 | `tests/` — 使用 pytest 的综合测试套件 |
+| 集成测试 | 文件名以 `_int` 后缀标识，需要数据库连接 |
+| 评估脚本 | `tests/evals/` — 端到端评估 |
 
-- `OPENAI_API_KEY` - Required for LLM inference and embeddings
-- `USE_PARALLEL_RUNTIME` - Optional boolean for Neo4j parallel runtime (enterprise only)
-- Provider-specific keys: `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `GROQ_API_KEY`, `VOYAGE_API_KEY`
+### 常用测试命令
 
-### Database Setup
+```bash
+# 运行全部测试
+make test
+# 或使用 pytest
+pytest
 
-- **Neo4j**: Version 5.26+ required, available via Neo4j Desktop
-  - Database name defaults to `neo4j` (hardcoded in Neo4jDriver)
-  - Override by passing `database` parameter to driver constructor
-- **FalkorDB**: Version 1.1.2+ as alternative backend
-  - Database name defaults to `default_db` (hardcoded in FalkorDriver)
-  - Override by passing `database` parameter to driver constructor
+# 运行指定文件
+pytest tests/test_specific_file.py
 
-## Development Guidelines
+# 运行指定方法
+pytest tests/test_file.py::test_method_name
 
-### Code Style
+# 仅运行集成测试
+pytest tests/ -k "_int"
 
-- Use Ruff for formatting and linting (configured in pyproject.toml)
-- Line length: 100 characters
-- Quote style: single quotes
-- Type checking with Pyright is enforced
-- Main project uses `typeCheckingMode = "basic"`, server uses `typeCheckingMode = "standard"`
+# 仅运行单元测试
+pytest tests/ -k "not _int"
+```
 
-### Testing Requirements
+> **提示**：支持使用 `pytest-xdist` 进行并行测试执行。
 
-- Run tests with `make test` or `pytest`
-- Integration tests require database connections and are marked with `_int` suffix
-- Use `pytest-xdist` for parallel test execution
-- Run specific test files: `pytest tests/test_specific_file.py`
-- Run specific test methods: `pytest tests/test_file.py::test_method_name`
-- Run only integration tests: `pytest tests/ -k "_int"`
-- Run only unit tests: `pytest tests/ -k "not _int"`
+---
 
-### LLM Provider Support
+## 配置
 
-The codebase supports multiple LLM providers but works best with services supporting structured output (OpenAI, Gemini). Other providers may cause schema validation issues, especially with smaller models.
+### 环境变量
 
-#### Current LLM Models (as of November 2025)
+| 变量 | 说明 |
+|---|---|
+| `OPENAI_API_KEY` | **必需** — 用于 LLM 推理和嵌入 |
+| `ANTHROPIC_API_KEY` | 可选 — Anthropic 提供商 |
+| `GOOGLE_API_KEY` | 可选 — Google Gemini 提供商 |
+| `GROQ_API_KEY` | 可选 — Groq 提供商 |
+| `VOYAGE_API_KEY` | 可选 — Voyage 嵌入提供商 |
+| `USE_PARALLEL_RUNTIME` | 可选布尔值 — Neo4j 并行运行时（仅企业版） |
 
-**OpenAI Models:**
-- **GPT-5 Family** (Reasoning models, require temperature=0):
-  - `gpt-5-mini` - Fast reasoning model
-  - `gpt-5-nano` - Smallest reasoning model
-- **GPT-4.1 Family** (Standard models):
-  - `gpt-4.1` - Full capability model
-  - `gpt-4.1-mini` - Efficient model for most tasks
-  - `gpt-4.1-nano` - Lightweight model
-- **Legacy Models** (Still supported):
-  - `gpt-4o` - Previous generation flagship
-  - `gpt-4o-mini` - Previous generation efficient
+### 数据库配置
 
-**Anthropic Models:**
-- **Claude 4.5 Family** (Latest):
-  - `claude-sonnet-4-5-latest` - Flagship model, auto-updates
-  - `claude-sonnet-4-5-20250929` - Pinned Sonnet version from September 2025
-  - `claude-haiku-4-5-latest` - Fast model, auto-updates
-- **Claude 3.7 Family**:
-  - `claude-3-7-sonnet-latest` - Auto-updates
-  - `claude-3-7-sonnet-20250219` - Pinned version from February 2025
-- **Claude 3.5 Family**:
-  - `claude-3-5-sonnet-latest` - Auto-updates
-  - `claude-3-5-sonnet-20241022` - Pinned version from October 2024
-  - `claude-3-5-haiku-latest` - Fast model
+#### Neo4j
 
-**Google Gemini Models:**
-- **Gemini 2.5 Family** (Latest):
-  - `gemini-2.5-pro` - Flagship reasoning and multimodal
-  - `gemini-2.5-flash` - Fast, efficient
-- **Gemini 2.0 Family**:
-  - `gemini-2.0-flash` - Experimental fast model
-- **Gemini 1.5 Family** (Stable):
-  - `gemini-1.5-pro` - Production-stable flagship
-  - `gemini-1.5-flash` - Production-stable efficient
+- 要求版本 **5.26+**，可通过 Neo4j Desktop 获取
+- 数据库名默认为 `neo4j`（在 `Neo4jDriver` 中硬编码）
+- 可通过向驱动构造函数传递 `database` 参数覆盖
 
-**Note**: Model names like `gpt-5-mini`, `gpt-4.1`, and `gpt-4.1-mini` used in this codebase are valid OpenAI model identifiers. The GPT-5 family are reasoning models that require `temperature=0` (automatically handled in the code).
+#### FalkorDB
 
-### MCP Server Usage Guidelines
+- 要求版本 **1.1.2+**，作为替代后端
+- 数据库名默认为 `default_db`（在 `FalkorDriver` 中硬编码）
+- 可通过向驱动构造函数传递 `database` 参数覆盖
 
-When working with the MCP server, follow the patterns established in `mcp_server/cursor_rules.md`:
+---
 
-- Always search for existing knowledge before adding new information
-- Use specific entity type filters (`Preference`, `Procedure`, `Requirement`)
-- Store new information immediately using `add_memory`
-- Follow discovered procedures and respect established preferences
+## 开发规范
+
+### 代码风格
+
+- 使用 **Ruff** 进行格式化和代码检查（配置在 `pyproject.toml`）
+- 行长度上限：**100 字符**
+- 引号风格：**单引号**
+- 强制使用 **Pyright** 类型检查
+  - 主项目：`typeCheckingMode = "basic"`
+  - Server：`typeCheckingMode = "standard"`
+
+### LLM 提供商支持
+
+代码库支持多种 LLM 提供商，但与支持**结构化输出**的服务（OpenAI、Gemini）配合最佳。其他提供商（尤其是较小模型）可能出现 Schema 验证问题。
+
+#### 当前支持的模型（截至 2025 年 11 月）
+
+**OpenAI 模型：**
+
+| 系列 | 模型 | 说明 |
+|---|---|---|
+| GPT-5（推理模型，需 `temperature=0`） | `gpt-5-mini` | 快速推理模型 |
+| | `gpt-5-nano` | 最小推理模型 |
+| GPT-4.1（标准模型） | `gpt-4.1` | 全能力模型 |
+| | `gpt-4.1-mini` | 适合大多数任务的高效模型 |
+| | `gpt-4.1-nano` | 轻量模型 |
+| 旧版（仍支持） | `gpt-4o` | 上一代旗舰 |
+| | `gpt-4o-mini` | 上一代高效版 |
+
+**Anthropic 模型：**
+
+| 系列 | 模型 | 说明 |
+|---|---|---|
+| Claude 4.5 | `claude-sonnet-4-5-latest` | 旗舰模型，自动更新 |
+| | `claude-sonnet-4-5-20250929` | 固定版本（2025年9月） |
+| | `claude-haiku-4-5-latest` | 快速模型，自动更新 |
+| Claude 3.7 | `claude-3-7-sonnet-latest` | 自动更新 |
+| | `claude-3-7-sonnet-20250219` | 固定版本（2025年2月） |
+| Claude 3.5 | `claude-3-5-sonnet-latest` | 自动更新 |
+| | `claude-3-5-sonnet-20241022` | 固定版本（2024年10月） |
+| | `claude-3-5-haiku-latest` | 快速模型 |
+
+**Google Gemini 模型：**
+
+| 系列 | 模型 | 说明 |
+|---|---|---|
+| Gemini 2.5 | `gemini-2.5-pro` | 旗舰推理与多模态 |
+| | `gemini-2.5-flash` | 快速高效 |
+| Gemini 2.0 | `gemini-2.0-flash` | 实验性快速模型 |
+| Gemini 1.5（稳定版） | `gemini-1.5-pro` | 生产稳定版旗舰 |
+| | `gemini-1.5-flash` | 生产稳定版高效 |
+
+> **注意**：`gpt-5-mini`、`gpt-4.1`、`gpt-4.1-mini` 等模型名是有效的 OpenAI 模型标识符。GPT-5 系列为推理模型，需要 `temperature=0`（代码中已自动处理）。
+
+---
+
+## MCP Server 使用指南
+
+使用 MCP Server 时，请遵循 `mcp_server/cursor_rules.md` 中的规范：
+
+- 添加新信息前，**先搜索已有知识**
+- 使用特定的实体类型过滤器（`Preference`、`Procedure`、`Requirement`）
+- 使用 `add_memory` **立即存储**新信息
+- 遵循已发现的流程，尊重已建立的偏好设置
