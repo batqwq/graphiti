@@ -227,6 +227,7 @@ The `config.yaml` file supports environment variable expansion using `${VAR_NAME
 - `NEO4J_USER`: Neo4j username (default: `neo4j`)
 - `NEO4J_PASSWORD`: Neo4j password (default: `demodemo`)
 - `OPENAI_API_KEY`: OpenAI API key (required for OpenAI LLM/embedder)
+- `FIREWORKS_API_KEY`: Fireworks API key (for Fireworks LLM models)
 - `ANTHROPIC_API_KEY`: Anthropic API key (for Claude models)
 - `GOOGLE_API_KEY`: Google API key (for Gemini models)
 - `GROQ_API_KEY`: Groq API key (for Groq models)
@@ -317,9 +318,9 @@ uv run main.py --config config/config-docker-falkordb.yaml
 ### Available Command-Line Arguments
 
 - `--config`: Path to YAML configuration file (default: config.yaml)
-- `--llm-provider`: LLM provider to use (openai, anthropic, gemini, groq, azure_openai)
-- `--embedder-provider`: Embedder provider to use (openai, azure_openai, gemini, voyage)
-- `--database-provider`: Database provider to use (falkordb, neo4j) - default: falkordb
+- `--llm-provider`: LLM provider to use (openai, anthropic, gemini, groq, fireworks, azure_openai)
+- `--embedder-provider`: Embedder provider to use (openai, openrouter, azure_openai, gemini, voyage)
+- `--database-provider`: Database provider to use (kuzu, falkordb, neo4j) - default: falkordb
 - `--model`: Model name to use with the LLM client
 - `--temperature`: Temperature setting for the LLM (0.0-2.0)
 - `--transport`: Choose the transport method (http or stdio, default: http)

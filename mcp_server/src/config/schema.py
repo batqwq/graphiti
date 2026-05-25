@@ -125,6 +125,13 @@ class GroqProviderConfig(BaseModel):
     api_url: str = 'https://api.groq.com/openai/v1'
 
 
+class FireworksProviderConfig(BaseModel):
+    """Fireworks AI provider configuration."""
+
+    api_key: str | None = None
+    api_url: str = 'https://api.fireworks.ai/inference/v1'
+
+
 class VoyageProviderConfig(BaseModel):
     """Voyage AI provider configuration."""
 
@@ -141,6 +148,7 @@ class LLMProvidersConfig(BaseModel):
     anthropic: AnthropicProviderConfig | None = None
     gemini: GeminiProviderConfig | None = None
     groq: GroqProviderConfig | None = None
+    fireworks: FireworksProviderConfig | None = None
 
 
 class LLMConfig(BaseModel):
@@ -159,6 +167,7 @@ class EmbedderProvidersConfig(BaseModel):
     """Embedder providers configuration."""
 
     openai: OpenAIProviderConfig | None = None
+    openrouter: OpenAIProviderConfig | None = None
     azure_openai: AzureOpenAIProviderConfig | None = None
     gemini: GeminiProviderConfig | None = None
     voyage: VoyageProviderConfig | None = None
@@ -170,6 +179,7 @@ class EmbedderConfig(BaseModel):
     provider: str = Field(default='openai', description='Embedder provider')
     model: str = Field(default='text-embedding-3-small', description='Model name')
     dimensions: int = Field(default=1536, description='Embedding dimensions')
+    batch_size: int = Field(default=100, ge=1, description='Embedding request batch size')
     providers: EmbedderProvidersConfig = Field(default_factory=EmbedderProvidersConfig)
 
 
@@ -191,11 +201,19 @@ class FalkorDBProviderConfig(BaseModel):
     database: str = 'default_db'
 
 
+class KuzuProviderConfig(BaseModel):
+    """Kuzu provider configuration."""
+
+    db: str = 'data/kuzu'
+    max_concurrent_queries: int = 1
+
+
 class DatabaseProvidersConfig(BaseModel):
     """Database providers configuration."""
 
     neo4j: Neo4jProviderConfig | None = None
     falkordb: FalkorDBProviderConfig | None = None
+    kuzu: KuzuProviderConfig | None = None
 
 
 class DatabaseConfig(BaseModel):

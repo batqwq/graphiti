@@ -163,6 +163,8 @@ cython_debug/
 ## Other
 # Cache files
 cache.db*
+data/
+logs/
 
 # All DS_Store files
 .DS_Store

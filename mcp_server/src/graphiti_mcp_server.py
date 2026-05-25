@@ -31,6 +31,7 @@ from models.response_types import (
     StatusResponse,
     SuccessResponse,
 )
+from services.cross_encoder import NoOpCrossEncoder
 from services.factories import DatabaseDriverFactory, EmbedderFactory, LLMClientFactory
 from services.queue_service import QueueService
 from utils.formatting import format_fact_result
@@ -39,7 +40,7 @@ from utils.formatting import format_fact_result
 mcp_server_dir = Path(__file__).parent.parent
 env_file = mcp_server_dir / '.env'
 if env_file.exists():
-    load_dotenv(env_file)
+    load_dotenv(env_file, override=True)
 else:
     # Try current working directory as fallback
     load_dotenv()
@@ -174,6 +175,7 @@ class GraphitiService:
             # Create clients using factories
             llm_client = None
             embedder_client = None
+            cross_encoder_client = NoOpCrossEncoder()
 
             # Create LLM client based on configured provider
             try:
@@ -186,6 +188,26 @@ class GraphitiService:
                 embedder_client = EmbedderFactory.create(self.config.embedder)
             except Exception as e:
                 logger.warning(f'Failed to create embedder client: {e}')
+
+            try:
+                google_api_key = os.getenv('GOOGLE_API_KEY')
+                gemini_reranker_model = os.getenv('GEMINI_RERANKER_MODEL')
+                if google_api_key and gemini_reranker_model:
+                    from graphiti_core.cross_encoder.gemini_reranker_client import (
+                        GeminiRerankerClient,
+                    )
+                    from graphiti_core.llm_client.config import LLMConfig as CoreLLMConfig
+
+                    cross_encoder_client = GeminiRerankerClient(
+                        config=CoreLLMConfig(
+                            api_key=google_api_key,
+                            model=gemini_reranker_model,
+                            temperature=0,
+                            max_tokens=16,
+                        )
+                    )
+            except Exception as e:
+                logger.warning(f'Failed to create Gemini reranker, using no-op reranker: {e}')
 
             # Get database configuration
             db_config = DatabaseDriverFactory.create_config(self.config.database)
@@ -211,7 +233,8 @@ class GraphitiService:
 
             # Initialize Graphiti client with appropriate driver
             try:
-                if self.config.database.provider.lower() == 'falkordb':
+                db_provider = self.config.database.provider.lower()
+                if db_provider == 'falkordb':
                     # For FalkorDB, create a FalkorDriver instance directly
                     from graphiti_core.driver.falkordb_driver import FalkorDriver
 
@@ -226,6 +249,22 @@ class GraphitiService:
                         graph_driver=falkor_driver,
                         llm_client=llm_client,
                         embedder=embedder_client,
+                        cross_encoder=cross_encoder_client,
+                        max_coroutines=self.semaphore_limit,
+                    )
+                elif db_provider == 'kuzu':
+                    from graphiti_core.driver.kuzu_driver import KuzuDriver
+
+                    kuzu_driver = KuzuDriver(
+                        db=db_config['db'],
+                        max_concurrent_queries=db_config['max_concurrent_queries'],
+                    )
+
+                    self.client = Graphiti(
+                        graph_driver=kuzu_driver,
+                        llm_client=llm_client,
+                        embedder=embedder_client,
+                        cross_encoder=cross_encoder_client,
                         max_coroutines=self.semaphore_limit,
                     )
                 else:
@@ -236,6 +275,7 @@ class GraphitiService:
                         password=db_config['password'],
                         llm_client=llm_client,
                         embedder=embedder_client,
+                        cross_encoder=cross_encoder_client,
                         max_coroutines=self.semaphore_limit,
                     )
             except Exception as db_error:
@@ -796,17 +836,17 @@ async def initialize_server() -> ServerConfig:
     # Provider selection arguments
     parser.add_argument(
         '--llm-provider',
-        choices=['openai', 'azure_openai', 'anthropic', 'gemini', 'groq'],
+        choices=['openai', 'azure_openai', 'anthropic', 'gemini', 'groq', 'fireworks'],
         help='LLM provider to use',
     )
     parser.add_argument(
         '--embedder-provider',
-        choices=['openai', 'azure_openai', 'gemini', 'voyage'],
+        choices=['openai', 'openrouter', 'azure_openai', 'gemini', 'voyage'],
         help='Embedder provider to use',
     )
     parser.add_argument(
         '--database-provider',
-        choices=['neo4j', 'falkordb'],
+        choices=['neo4j', 'falkordb', 'kuzu'],
         help='Database provider to use',
     )
 
@@ -932,8 +972,8 @@ async def run_mcp_server():
         logger.info(f'  MCP Endpoint: http://{display_host}:{mcp.settings.port}/mcp/')
         logger.info('  Transport: HTTP (streamable)')
 
-        # Show FalkorDB Browser UI access if enabled
-        if os.environ.get('BROWSER', '1') == '1':
+        # Show FalkorDB Browser UI access if enabled and relevant
+        if config.database.provider.lower() == 'falkordb' and os.environ.get('BROWSER', '1') == '1':
             logger.info(f'  FalkorDB Browser UI: http://{display_host}:3000/')
 
         logger.info('=' * 60)

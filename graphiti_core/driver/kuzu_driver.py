@@ -44,6 +44,7 @@ from graphiti_core.driver.operations.has_episode_edge_ops import HasEpisodeEdgeO
 from graphiti_core.driver.operations.next_episode_edge_ops import NextEpisodeEdgeOperations
 from graphiti_core.driver.operations.saga_node_ops import SagaNodeOperations
 from graphiti_core.driver.operations.search_ops import SearchOperations
+from graphiti_core.graph_queries import get_fulltext_indices
 
 logger = logging.getLogger(__name__)
 
@@ -143,6 +144,7 @@ class KuzuDriver(GraphDriver):
         max_concurrent_queries: int = 1,
     ):
         super().__init__()
+        self._database = db
         self.db = kuzu.Database(db)
 
         self.setup_schema()
@@ -243,10 +245,12 @@ class KuzuDriver(GraphDriver):
         pass
 
     async def build_indices_and_constraints(self, delete_existing: bool = False):
-        # Kuzu doesn't support dynamic index creation like Neo4j or FalkorDB
-        # Schema and indices are created during setup_schema()
-        # This method is required by the abstract base class but is a no-op for Kuzu
-        pass
+        for query in get_fulltext_indices(GraphProvider.KUZU):
+            try:
+                await self.client.execute(query)
+            except RuntimeError as err:
+                if 'already exists' not in str(err):
+                    raise
 
     def setup_schema(self):
         conn = kuzu.Connection(self.db)

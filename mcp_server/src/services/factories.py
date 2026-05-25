@@ -14,10 +14,19 @@ try:
 except ImportError:
     HAS_FALKOR = False
 
-# Kuzu support removed - FalkorDB is now the default
+try:
+    from graphiti_core.driver.kuzu_driver import KuzuDriver  # noqa: F401
+
+    HAS_KUZU = True
+except ImportError:
+    HAS_KUZU = False
+
 from graphiti_core.embedder import EmbedderClient, OpenAIEmbedder
 from graphiti_core.llm_client import LLMClient, OpenAIClient
 from graphiti_core.llm_client.config import LLMConfig as GraphitiLLMConfig
+from graphiti_core.llm_client.openai_generic_client import OpenAIGenericClient
+
+from services.openrouter_embedder import OpenRouterEmbedder, OpenRouterEmbedderConfig
 
 # Try to import additional providers if available
 try:
@@ -242,6 +251,23 @@ class LLMClientFactory:
                 )
                 return GroqClient(config=llm_config)
 
+            case 'fireworks':
+                if not config.providers.fireworks:
+                    raise ValueError('Fireworks provider configuration not found')
+
+                fireworks_config = config.providers.fireworks
+                api_key = fireworks_config.api_key
+                _validate_api_key('Fireworks', api_key, logger)
+
+                llm_config = GraphitiLLMConfig(
+                    api_key=api_key,
+                    base_url=fireworks_config.api_url,
+                    model=config.model,
+                    temperature=config.temperature,
+                    max_tokens=config.max_tokens,
+                )
+                return OpenAIGenericClient(config=llm_config, max_tokens=config.max_tokens)
+
             case _:
                 raise ValueError(f'Unsupported LLM provider: {provider}')
 
@@ -275,6 +301,23 @@ class EmbedderFactory:
                     embedding_dim=config.dimensions,  # Support custom embedding dimensions
                 )
                 return OpenAIEmbedder(config=embedder_config)
+
+            case 'openrouter':
+                if not config.providers.openrouter:
+                    raise ValueError('OpenRouter provider configuration not found')
+
+                openrouter_config = config.providers.openrouter
+                api_key = openrouter_config.api_key
+                _validate_api_key('OpenRouter Embedder', api_key, logger)
+
+                embedder_config = OpenRouterEmbedderConfig(
+                    api_key=api_key,
+                    embedding_model=config.model,
+                    base_url=openrouter_config.api_url,
+                    embedding_dim=config.dimensions,
+                    batch_size=config.batch_size,
+                )
+                return OpenRouterEmbedder(config=embedder_config)
 
             case 'azure_openai':
                 if not HAS_AZURE_EMBEDDER:
@@ -329,10 +372,10 @@ class EmbedderFactory:
 
                 gemini_config = GeminiEmbedderConfig(
                     api_key=api_key,
-                    embedding_model=config.model or 'models/text-embedding-004',
+                    embedding_model=config.model or 'gemini-embedding-2',
                     embedding_dim=config.dimensions or 768,
                 )
-                return GeminiEmbedder(config=gemini_config)
+                return GeminiEmbedder(config=gemini_config, batch_size=config.batch_size)
 
             case 'voyage':
                 if not HAS_VOYAGE_EMBEDDER:
@@ -429,6 +472,35 @@ class DatabaseDriverFactory:
                     'port': port,
                     'password': password,
                     'database': falkor_config.database,
+                }
+
+            case 'kuzu':
+                if not HAS_KUZU:
+                    raise ValueError(
+                        'Kuzu driver not available in current graphiti-core version. '
+                        'Install it with: pip install graphiti-core[kuzu] or pip install kuzu'
+                    )
+
+                if config.providers.kuzu:
+                    kuzu_config = config.providers.kuzu
+                else:
+                    from config.schema import KuzuProviderConfig
+
+                    kuzu_config = KuzuProviderConfig()
+
+                import os
+                from pathlib import Path
+
+                db = os.environ.get('KUZU_DB', kuzu_config.db)
+                db_path = Path(db)
+                if not db_path.is_absolute():
+                    db_path = Path.cwd() / db_path
+                db_path.parent.mkdir(parents=True, exist_ok=True)
+
+                return {
+                    'driver': 'kuzu',
+                    'db': str(db_path),
+                    'max_concurrent_queries': kuzu_config.max_concurrent_queries,
                 }
 
             case _:
