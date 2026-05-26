@@ -11,7 +11,7 @@ import sys
 from html import escape
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlparse
 
 from dotenv import load_dotenv
 from graphiti_core import Graphiti
@@ -21,6 +21,7 @@ from graphiti_core.search.search_filters import SearchFilters
 from graphiti_core.utils.maintenance.graph_data_operations import clear_data
 from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions, RevocationOptions
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import BaseModel
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -225,12 +226,38 @@ def create_auth_components() -> tuple[AuthSettings | None, PasswordOAuthProvider
 
 auth_settings, oauth_provider = create_auth_components()
 
+
+def create_transport_security_settings() -> TransportSecuritySettings:
+    allowed_hosts = ['127.0.0.1:*', 'localhost:*', '[::1]:*']
+    allowed_origins = ['http://127.0.0.1:*', 'http://localhost:*', 'http://[::1]:*']
+
+    public_url = os.getenv('MCP_PUBLIC_URL', '').rstrip('/')
+    if public_url:
+        parsed_url = urlparse(public_url)
+        if parsed_url.netloc:
+            allowed_hosts.extend([parsed_url.netloc, f'{parsed_url.netloc}:*'])
+            allowed_origins.append(public_url)
+
+    extra_hosts = os.getenv('MCP_ALLOWED_HOSTS', '')
+    allowed_hosts.extend(host for host in extra_hosts.split() if host)
+
+    extra_origins = os.getenv('MCP_ALLOWED_ORIGINS', '')
+    allowed_origins.extend(origin for origin in extra_origins.split() if origin)
+
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=allowed_hosts,
+        allowed_origins=allowed_origins,
+    )
+
+
 # MCP server instance
 mcp = FastMCP(
     'Graphiti Agent Memory',
     instructions=GRAPHITI_MCP_INSTRUCTIONS,
     auth=auth_settings,
     auth_server_provider=oauth_provider,
+    transport_security=create_transport_security_settings(),
 )
 
 # Global services
