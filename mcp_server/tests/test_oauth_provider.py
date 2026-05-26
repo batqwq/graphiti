@@ -92,3 +92,33 @@ async def test_password_oauth_provider_rejects_expired_pending_authorization():
     request_id = parse_qs(urlparse(authorization_url).query)['request_id'][0]
 
     assert provider.complete_authorization(request_id, 'secret') is None
+
+
+@pytest.mark.asyncio
+async def test_password_oauth_provider_persists_registered_clients(tmp_path):
+    client_store_path = tmp_path / 'oauth_clients.json'
+    provider = PasswordOAuthProvider(
+        public_url='https://raz.942778.online',
+        approval_password='secret',
+        scopes=['graphiti:read'],
+        client_store_path=client_store_path,
+    )
+    client = OAuthClientInformationFull(
+        client_id='client-1',
+        redirect_uris=['https://chatgpt.com/callback'],
+        token_endpoint_auth_method='none',
+        scope='graphiti:read',
+    )
+
+    await provider.register_client(client)
+
+    reloaded_provider = PasswordOAuthProvider(
+        public_url='https://raz.942778.online',
+        approval_password='secret',
+        scopes=['graphiti:read'],
+        client_store_path=client_store_path,
+    )
+
+    reloaded_client = await reloaded_provider.get_client('client-1')
+    assert reloaded_client is not None
+    assert [str(uri) for uri in reloaded_client.redirect_uris] == ['https://chatgpt.com/callback']

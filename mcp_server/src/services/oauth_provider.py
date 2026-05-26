@@ -1,9 +1,12 @@
 """Small OAuth provider for protecting a self-hosted Graphiti MCP server."""
 
 import hmac
+import json
+import logging
 import secrets
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import urlencode
 
 from mcp.server.auth.provider import (
@@ -15,6 +18,8 @@ from mcp.server.auth.provider import (
     construct_redirect_uri,
 )
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -39,18 +44,52 @@ class PasswordOAuthProvider:
         scopes: list[str],
         token_ttl_seconds: int = 60 * 60 * 24 * 30,
         auth_code_ttl_seconds: int = 300,
+        client_store_path: str | Path | None = None,
     ):
         self.public_url = public_url.rstrip('/')
         self.approval_password = approval_password
         self.scopes = scopes
         self.token_ttl_seconds = token_ttl_seconds
         self.auth_code_ttl_seconds = auth_code_ttl_seconds
+        self.client_store_path = Path(client_store_path) if client_store_path else None
 
         self.clients: dict[str, OAuthClientInformationFull] = {}
         self.pending_authorizations: dict[str, PendingAuthorization] = {}
         self.authorization_codes: dict[str, AuthorizationCode] = {}
         self.access_tokens: dict[str, AccessToken] = {}
         self.refresh_tokens: dict[str, RefreshToken] = {}
+        self._load_clients()
+
+    def _load_clients(self) -> None:
+        if self.client_store_path is None or not self.client_store_path.exists():
+            return
+
+        try:
+            raw_clients = json.loads(self.client_store_path.read_text(encoding='utf-8'))
+        except (OSError, json.JSONDecodeError) as error:
+            logger.warning('Failed to load OAuth client store %s: %s', self.client_store_path, error)
+            return
+
+        if not isinstance(raw_clients, dict):
+            logger.warning('Ignoring OAuth client store %s because it is not an object', self.client_store_path)
+            return
+
+        for client_id, client_data in raw_clients.items():
+            try:
+                client = OAuthClientInformationFull.model_validate(client_data)
+            except Exception as error:
+                logger.warning('Ignoring invalid OAuth client %s: %s', client_id, error)
+                continue
+            if client.client_id is not None:
+                self.clients[client.client_id] = client
+
+    def _save_clients(self) -> None:
+        if self.client_store_path is None:
+            return
+
+        self.client_store_path.parent.mkdir(parents=True, exist_ok=True)
+        clients = {client_id: client.model_dump(mode='json') for client_id, client in self.clients.items()}
+        self.client_store_path.write_text(json.dumps(clients, indent=2, sort_keys=True), encoding='utf-8')
 
     async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
         return self.clients.get(client_id)
@@ -59,6 +98,7 @@ class PasswordOAuthProvider:
         if client_info.client_id is None:
             raise ValueError('client_id is required')
         self.clients[client_info.client_id] = client_info
+        self._save_clients()
 
     async def authorize(
         self, client: OAuthClientInformationFull, params: AuthorizationParams

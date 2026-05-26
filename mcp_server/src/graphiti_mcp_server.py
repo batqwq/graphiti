@@ -38,6 +38,7 @@ from models.response_types import (
 )
 from services.cross_encoder import NoOpCrossEncoder
 from services.factories import DatabaseDriverFactory, EmbedderFactory, LLMClientFactory
+from services.kuzu_compat import ensure_kuzu_database_attribute
 from services.oauth_provider import PasswordOAuthProvider
 from services.queue_service import QueueService
 from utils.formatting import (
@@ -205,11 +206,16 @@ def create_auth_components() -> tuple[AuthSettings | None, PasswordOAuthProvider
     resource_path = os.getenv('MCP_AUTH_RESOURCE_PATH', '/mcp/').strip() or '/mcp/'
     if not resource_path.startswith('/'):
         resource_path = f'/{resource_path}'
+    client_store_path = os.getenv('MCP_AUTH_CLIENT_STORE_PATH')
+    if not client_store_path:
+        client_store_path = str(mcp_server_dir / 'data' / 'oauth_clients.json')
+
     auth_provider = PasswordOAuthProvider(
         public_url=public_url,
         approval_password=approval_password,
         scopes=scopes,
         token_ttl_seconds=_env_int('MCP_AUTH_TOKEN_TTL_SECONDS', 60 * 60 * 24 * 30),
+        client_store_path=client_store_path,
     )
     auth_settings = AuthSettings(
         issuer_url=public_url,
@@ -370,6 +376,7 @@ class GraphitiService:
                         db=db_config['db'],
                         max_concurrent_queries=db_config['max_concurrent_queries'],
                     )
+                    ensure_kuzu_database_attribute(kuzu_driver, db_config['db'])
 
                     self.client = Graphiti(
                         graph_driver=kuzu_driver,

@@ -43,3 +43,31 @@ async def test_queue_status_tracks_processing_completion_and_failures():
     status = queue_service.get_queue_status(group_id)
     assert status['total_failed'] == 1
     assert status['groups'][group_id]['last_error'] == 'expected failure'
+
+
+@pytest.mark.asyncio
+async def test_queue_starts_one_worker_per_group_for_rapid_submissions(monkeypatch):
+    queue_service = QueueService()
+    group_id = 'rapid-submit'
+    worker_starts = 0
+    release = asyncio.Event()
+
+    async def fake_worker(group_id: str):
+        nonlocal worker_starts
+        worker_starts += 1
+        await release.wait()
+
+    monkeypatch.setattr(queue_service, '_process_episode_queue', fake_worker)
+
+    async def task():
+        pass
+
+    await asyncio.gather(
+        queue_service.add_episode_task(group_id, task),
+        queue_service.add_episode_task(group_id, task),
+        queue_service.add_episode_task(group_id, task),
+    )
+    await asyncio.sleep(0)
+
+    release.set()
+    assert worker_starts == 1
