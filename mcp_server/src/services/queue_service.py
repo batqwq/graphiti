@@ -18,6 +18,12 @@ class QueueService:
         self._episode_queues: dict[str, asyncio.Queue] = {}
         # Dictionary to track if a worker is running for each group_id
         self._queue_workers: dict[str, bool] = {}
+        self._active_tasks: dict[str, int] = {}
+        self._completed_tasks: dict[str, int] = {}
+        self._failed_tasks: dict[str, int] = {}
+        self._last_started_at: dict[str, str | None] = {}
+        self._last_finished_at: dict[str, str | None] = {}
+        self._last_error: dict[str, str | None] = {}
         # Store the graphiti client after initialization
         self._graphiti_client: Any = None
 
@@ -36,6 +42,12 @@ class QueueService:
         # Initialize queue for this group_id if it doesn't exist
         if group_id not in self._episode_queues:
             self._episode_queues[group_id] = asyncio.Queue()
+            self._active_tasks[group_id] = 0
+            self._completed_tasks[group_id] = 0
+            self._failed_tasks[group_id] = 0
+            self._last_started_at[group_id] = None
+            self._last_finished_at[group_id] = None
+            self._last_error[group_id] = None
 
         # Add the episode processing function to the queue
         await self._episode_queues[group_id].put(process_func)
@@ -63,12 +75,22 @@ class QueueService:
 
                 try:
                     # Process the episode
+                    self._active_tasks[group_id] = self._active_tasks.get(group_id, 0) + 1
+                    self._last_started_at[group_id] = datetime.now(timezone.utc).isoformat()
+                    self._last_error[group_id] = None
                     await process_func()
+                    self._completed_tasks[group_id] = self._completed_tasks.get(group_id, 0) + 1
                 except Exception as e:
+                    self._failed_tasks[group_id] = self._failed_tasks.get(group_id, 0) + 1
+                    self._last_error[group_id] = str(e)
                     logger.error(
                         f'Error processing queued episode for group_id {group_id}: {str(e)}'
                     )
                 finally:
+                    self._active_tasks[group_id] = max(
+                        0, self._active_tasks.get(group_id, 0) - 1
+                    )
+                    self._last_finished_at[group_id] = datetime.now(timezone.utc).isoformat()
                     # Mark the task as done regardless of success/failure
                     self._episode_queues[group_id].task_done()
         except asyncio.CancelledError:
@@ -88,6 +110,44 @@ class QueueService:
     def is_worker_running(self, group_id: str) -> bool:
         """Check if a worker is running for a group_id."""
         return self._queue_workers.get(group_id, False)
+
+    def get_queue_status(self, group_id: str | None = None) -> dict[str, Any]:
+        """Get queue processing status for one group or all known groups."""
+        group_ids = [group_id] if group_id is not None else sorted(self._episode_queues.keys())
+        groups = {}
+
+        for current_group_id in group_ids:
+            queue = self._episode_queues.get(current_group_id)
+            pending = queue.qsize() if queue is not None else 0
+            processing = self._active_tasks.get(current_group_id, 0)
+            completed = self._completed_tasks.get(current_group_id, 0)
+            failed = self._failed_tasks.get(current_group_id, 0)
+
+            groups[current_group_id] = {
+                'pending': pending,
+                'processing': processing,
+                'completed': completed,
+                'failed': failed,
+                'worker_running': self._queue_workers.get(current_group_id, False),
+                'idle': pending == 0 and processing == 0,
+                'last_started_at': self._last_started_at.get(current_group_id),
+                'last_finished_at': self._last_finished_at.get(current_group_id),
+                'last_error': self._last_error.get(current_group_id),
+            }
+
+        total_pending = sum(group['pending'] for group in groups.values())
+        total_processing = sum(group['processing'] for group in groups.values())
+        total_completed = sum(group['completed'] for group in groups.values())
+        total_failed = sum(group['failed'] for group in groups.values())
+
+        return {
+            'status': 'idle' if total_pending == 0 and total_processing == 0 else 'processing',
+            'total_pending': total_pending,
+            'total_processing': total_processing,
+            'total_completed': total_completed,
+            'total_failed': total_failed,
+            'groups': groups,
+        }
 
     async def initialize(self, graphiti_client: Any) -> None:
         """Initialize the queue service with a graphiti client.

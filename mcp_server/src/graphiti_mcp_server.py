@@ -32,6 +32,7 @@ from models.response_types import (
     ErrorResponse,
     FactSearchResponse,
     NodeSearchResponse,
+    QueueStatusResponse,
     StatusResponse,
     SuccessResponse,
 )
@@ -552,6 +553,24 @@ async def add_memory(
         error_msg = str(e)
         logger.error(f'Error queuing episode: {error_msg}')
         return ErrorResponse(error=f'Error queuing episode: {error_msg}')
+
+
+@mcp.tool()
+async def get_memory_queue_status(group_id: str | None = None) -> QueueStatusResponse | ErrorResponse:
+    """Get background graph-building progress for queued memories.
+
+    Use this after add_memory when recent memories do not appear in search results yet. A group is fully
+    caught up when pending is 0 and processing is 0.
+
+    Args:
+        group_id: Optional memory group to inspect. If omitted, returns all known queue groups.
+    """
+    global queue_service
+
+    if queue_service is None:
+        return ErrorResponse(error='Queue service not initialized')
+
+    return queue_service.get_queue_status(group_id)
 
 
 @mcp.tool()

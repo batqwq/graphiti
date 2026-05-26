@@ -41,3 +41,24 @@ class EpisodeSearchResponse(TypedDict):
 class StatusResponse(TypedDict):
     status: str
     message: str
+
+
+class QueueGroupStatus(TypedDict):
+    pending: int
+    processing: int
+    completed: int
+    failed: int
+    worker_running: bool
+    idle: bool
+    last_started_at: str | None
+    last_finished_at: str | None
+    last_error: str | None
+
+
+class QueueStatusResponse(TypedDict):
+    status: str
+    total_pending: int
+    total_processing: int
+    total_completed: int
+    total_failed: int
+    groups: dict[str, QueueGroupStatus]
