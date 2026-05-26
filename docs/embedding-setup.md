@@ -151,15 +151,16 @@ MCP_AUTH_ENABLED=true
 MCP_PUBLIC_URL=https://raz.942778.online
 MCP_AUTH_APPROVAL_PASSWORD=<set-a-long-private-password>
 MCP_AUTH_SCOPES=graphiti:read graphiti:write
+MCP_AUTH_RESOURCE_PATH=/sse
 MCP_AUTH_TOKEN_TTL_SECONDS=2592000
 ```
 
-Keep `/health` public for uptime checks, but protect `/mcp/` through the built-in OAuth
-flow. In Claude's custom connector form:
+Keep `/health` public for uptime checks, but protect the MCP transport endpoint through
+the built-in OAuth flow. For Claude's SSE custom connector form:
 
 ```text
 Name: Graphiti Memory
-Remote MCP server URL: https://raz.942778.online/mcp/
+Remote MCP server URL: https://raz.942778.online/sse
 OAuth Client ID: leave blank unless you intentionally pre-register a client
 OAuth Client Secret: leave blank unless you intentionally pre-register a client
 ```
@@ -167,6 +168,9 @@ OAuth Client Secret: leave blank unless you intentionally pre-register a client
 When Claude later prompts you to connect, enter `MCP_AUTH_APPROVAL_PASSWORD` on the
 Graphiti authorization page. Tokens are kept in memory and are invalidated when the MCP
 server restarts.
+
+If a client supports streamable HTTP instead of SSE, start the server with `--transport http`,
+set `MCP_AUTH_RESOURCE_PATH=/mcp`, and use `https://raz.942778.online/mcp`.
 
 ## Switching Plan A And Plan B
 

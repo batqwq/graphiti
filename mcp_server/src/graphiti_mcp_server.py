@@ -200,6 +200,9 @@ def create_auth_components() -> tuple[AuthSettings | None, PasswordOAuthProvider
         raise RuntimeError('MCP_AUTH_ENABLED=true requires MCP_AUTH_APPROVAL_PASSWORD')
 
     scopes = os.getenv('MCP_AUTH_SCOPES', 'graphiti:read graphiti:write').split()
+    resource_path = os.getenv('MCP_AUTH_RESOURCE_PATH', '/mcp/').strip() or '/mcp/'
+    if not resource_path.startswith('/'):
+        resource_path = f'/{resource_path}'
     auth_provider = PasswordOAuthProvider(
         public_url=public_url,
         approval_password=approval_password,
@@ -208,7 +211,7 @@ def create_auth_components() -> tuple[AuthSettings | None, PasswordOAuthProvider
     )
     auth_settings = AuthSettings(
         issuer_url=public_url,
-        resource_server_url=f'{public_url}/mcp/',
+        resource_server_url=f'{public_url}{resource_path}',
         client_registration_options=ClientRegistrationOptions(
             enabled=True,
             valid_scopes=scopes,
