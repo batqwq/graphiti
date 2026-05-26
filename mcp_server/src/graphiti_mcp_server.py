@@ -26,7 +26,6 @@ from models.response_types import (
     EpisodeSearchResponse,
     ErrorResponse,
     FactSearchResponse,
-    NodeResult,
     NodeSearchResponse,
     StatusResponse,
     SuccessResponse,
@@ -34,7 +33,12 @@ from models.response_types import (
 from services.cross_encoder import NoOpCrossEncoder
 from services.factories import DatabaseDriverFactory, EmbedderFactory, LLMClientFactory
 from services.queue_service import QueueService
-from utils.formatting import format_fact_result
+from utils.formatting import (
+    DEFAULT_MAX_TEXT_CHARS,
+    format_episode_result,
+    format_fact_result,
+    format_node_result,
+)
 
 # Load .env file from mcp_server directory
 mcp_server_dir = Path(__file__).parent.parent
@@ -74,6 +78,28 @@ else:
 #
 # DEFAULT: 10 (suitable for OpenAI Tier 3, mid-tier Anthropic)
 SEMAPHORE_LIMIT = int(os.getenv('SEMAPHORE_LIMIT', 10))
+
+
+def _env_int(name: str, default: int, minimum: int = 1) -> int:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+
+    try:
+        value = int(raw_value)
+    except ValueError:
+        return default
+
+    return max(value, minimum)
+
+
+MAX_MCP_RESULTS = _env_int('MCP_OUTPUT_MAX_RESULTS', 20)
+
+
+def _bounded_result_limit(value: int, name: str) -> int:
+    if value <= 0:
+        raise ValueError(f'{name} must be a positive integer')
+    return min(value, MAX_MCP_RESULTS)
 
 
 # Configure structured logging with timestamps
@@ -465,6 +491,7 @@ async def search_nodes(
         return ErrorResponse(error='Graphiti service not initialized')
 
     try:
+        max_nodes = _bounded_result_limit(max_nodes, 'max_nodes')
         client = await graphiti_service.get_client()
 
         # Use the provided group_ids or fall back to the default from config if none provided
@@ -497,25 +524,7 @@ async def search_nodes(
         if not nodes:
             return NodeSearchResponse(message='No relevant nodes found', nodes=[])
 
-        # Format the results
-        node_results = []
-        for node in nodes:
-            # Get attributes and ensure no embeddings are included
-            attrs = node.attributes if hasattr(node, 'attributes') else {}
-            # Remove any embedding keys that might be in attributes
-            attrs = {k: v for k, v in attrs.items() if 'embedding' not in k.lower()}
-
-            node_results.append(
-                NodeResult(
-                    uuid=node.uuid,
-                    name=node.name,
-                    labels=node.labels if node.labels else [],
-                    created_at=node.created_at.isoformat() if node.created_at else None,
-                    summary=node.summary,
-                    group_id=node.group_id,
-                    attributes=attrs,
-                )
-            )
+        node_results = [format_node_result(node) for node in nodes]
 
         return NodeSearchResponse(message='Nodes retrieved successfully', nodes=node_results)
     except Exception as e:
@@ -545,9 +554,7 @@ async def search_memory_facts(
         return ErrorResponse(error='Graphiti service not initialized')
 
     try:
-        # Validate max_facts parameter
-        if max_facts <= 0:
-            return ErrorResponse(error='max_facts must be a positive integer')
+        max_facts = _bounded_result_limit(max_facts, 'max_facts')
 
         client = await graphiti_service.get_client()
 
@@ -661,12 +668,14 @@ async def get_entity_edge(uuid: str) -> dict[str, Any] | ErrorResponse:
 async def get_episodes(
     group_ids: list[str] | None = None,
     max_episodes: int = 10,
+    content_max_chars: int = DEFAULT_MAX_TEXT_CHARS,
 ) -> EpisodeSearchResponse | ErrorResponse:
     """Get episodes from the graph memory.
 
     Args:
         group_ids: Optional list of group IDs to filter results
         max_episodes: Maximum number of episodes to return (default: 10)
+        content_max_chars: Maximum preview characters per episode, capped by server settings
     """
     global graphiti_service
 
@@ -674,6 +683,10 @@ async def get_episodes(
         return ErrorResponse(error='Graphiti service not initialized')
 
     try:
+        max_episodes = _bounded_result_limit(max_episodes, 'max_episodes')
+        if content_max_chars < 0:
+            return ErrorResponse(error='content_max_chars must be zero or a positive integer')
+
         client = await graphiti_service.get_client()
 
         # Use the provided group_ids or fall back to the default from config if none provided
@@ -700,21 +713,13 @@ async def get_episodes(
         if not episodes:
             return EpisodeSearchResponse(message='No episodes found', episodes=[])
 
-        # Format the results
-        episode_results = []
-        for episode in episodes:
-            episode_dict = {
-                'uuid': episode.uuid,
-                'name': episode.name,
-                'content': episode.content,
-                'created_at': episode.created_at.isoformat() if episode.created_at else None,
-                'source': episode.source.value
-                if hasattr(episode.source, 'value')
-                else str(episode.source),
-                'source_description': episode.source_description,
-                'group_id': episode.group_id,
-            }
-            episode_results.append(episode_dict)
+        episode_results = [
+            format_episode_result(
+                episode,
+                content_max_chars=content_max_chars,
+            )
+            for episode in episodes
+        ]
 
         return EpisodeSearchResponse(
             message='Episodes retrieved successfully', episodes=episode_results
