@@ -8,8 +8,10 @@ import asyncio
 import logging
 import os
 import sys
+from html import escape
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import parse_qs
 
 from dotenv import load_dotenv
 from graphiti_core import Graphiti
@@ -17,9 +19,11 @@ from graphiti_core.edges import EntityEdge
 from graphiti_core.nodes import EpisodeType, EpisodicNode
 from graphiti_core.search.search_filters import SearchFilters
 from graphiti_core.utils.maintenance.graph_data_operations import clear_data
+from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions, RevocationOptions
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel
-from starlette.responses import JSONResponse
+from starlette.requests import Request
+from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from config.schema import GraphitiConfig, ServerConfig
 from models.response_types import (
@@ -32,6 +36,7 @@ from models.response_types import (
 )
 from services.cross_encoder import NoOpCrossEncoder
 from services.factories import DatabaseDriverFactory, EmbedderFactory, LLMClientFactory
+from services.oauth_provider import PasswordOAuthProvider
 from services.queue_service import QueueService
 from utils.formatting import (
     DEFAULT_MAX_TEXT_CHARS,
@@ -102,6 +107,13 @@ def _bounded_result_limit(value: int, name: str) -> int:
     return min(value, MAX_MCP_RESULTS)
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    return raw_value.strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
 # Configure structured logging with timestamps
 LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 DATE_FORMAT = '%Y-%m-%d %H:%M:%S'
@@ -170,10 +182,52 @@ For optimal performance, ensure the database is properly configured and accessib
 API keys are provided for any language model operations.
 """
 
+oauth_provider: PasswordOAuthProvider | None = None
+
+
+def create_auth_components() -> tuple[AuthSettings | None, PasswordOAuthProvider | None]:
+    if not _env_bool('MCP_AUTH_ENABLED'):
+        return None, None
+
+    public_url = os.getenv('MCP_PUBLIC_URL', '').rstrip('/')
+    if not public_url:
+        raise RuntimeError(
+            'MCP_AUTH_ENABLED=true requires MCP_PUBLIC_URL, e.g. https://raz.942778.online'
+        )
+
+    approval_password = os.getenv('MCP_AUTH_APPROVAL_PASSWORD', '')
+    if not approval_password:
+        raise RuntimeError('MCP_AUTH_ENABLED=true requires MCP_AUTH_APPROVAL_PASSWORD')
+
+    scopes = os.getenv('MCP_AUTH_SCOPES', 'graphiti:read graphiti:write').split()
+    auth_provider = PasswordOAuthProvider(
+        public_url=public_url,
+        approval_password=approval_password,
+        scopes=scopes,
+        token_ttl_seconds=_env_int('MCP_AUTH_TOKEN_TTL_SECONDS', 60 * 60 * 24 * 30),
+    )
+    auth_settings = AuthSettings(
+        issuer_url=public_url,
+        resource_server_url=f'{public_url}/mcp/',
+        client_registration_options=ClientRegistrationOptions(
+            enabled=True,
+            valid_scopes=scopes,
+            default_scopes=scopes,
+        ),
+        revocation_options=RevocationOptions(enabled=True),
+        required_scopes=[],
+    )
+    return auth_settings, auth_provider
+
+
+auth_settings, oauth_provider = create_auth_components()
+
 # MCP server instance
 mcp = FastMCP(
     'Graphiti Agent Memory',
     instructions=GRAPHITI_MCP_INSTRUCTIONS,
+    auth=auth_settings,
+    auth_server_provider=oauth_provider,
 )
 
 # Global services
@@ -802,6 +856,57 @@ async def get_status() -> StatusResponse:
 async def health_check(request) -> JSONResponse:
     """Health check endpoint for Docker and load balancers."""
     return JSONResponse({'status': 'healthy', 'service': 'graphiti-mcp'})
+
+
+@mcp.custom_route('/oauth/confirm', methods=['GET', 'POST'])
+async def oauth_confirm(request: Request) -> HTMLResponse | RedirectResponse:
+    """Password-gated OAuth approval page for Claude remote MCP connectors."""
+    if oauth_provider is None:
+        return HTMLResponse('OAuth is not enabled', status_code=404)
+
+    if request.method == 'GET':
+        request_id = request.query_params.get('request_id', '')
+        escaped_request_id = escape(request_id, quote=True)
+        return HTMLResponse(
+            f"""
+<!doctype html>
+<html>
+  <head>
+    <title>Authorize Graphiti MCP</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      body {{ font-family: system-ui, sans-serif; max-width: 520px; margin: 48px auto; padding: 0 20px; }}
+      input, button {{ font: inherit; box-sizing: border-box; width: 100%; padding: 10px; margin-top: 10px; }}
+      button {{ cursor: pointer; }}
+      .note {{ color: #555; line-height: 1.4; }}
+    </style>
+  </head>
+  <body>
+    <h1>Authorize Graphiti MCP</h1>
+    <p class="note">Enter your local MCP approval password to let this Claude connector access Graphiti memory.</p>
+    <form method="post">
+      <input type="hidden" name="request_id" value="{escaped_request_id}" />
+      <label>
+        Approval password
+        <input name="approval_password" type="password" autocomplete="current-password" autofocus />
+      </label>
+      <button type="submit">Authorize</button>
+    </form>
+  </body>
+</html>
+""",
+            status_code=200,
+        )
+
+    body = (await request.body()).decode('utf-8')
+    form = parse_qs(body, keep_blank_values=True)
+    request_id = form.get('request_id', [''])[0]
+    approval_password = form.get('approval_password', [''])[0]
+    redirect_url = oauth_provider.complete_authorization(request_id, approval_password)
+    if redirect_url is None:
+        return HTMLResponse('Authorization failed or expired', status_code=401)
+
+    return RedirectResponse(redirect_url, status_code=302)
 
 
 async def initialize_server() -> ServerConfig:

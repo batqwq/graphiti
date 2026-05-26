@@ -141,6 +141,33 @@ MCP clients should connect to:
 http://127.0.0.1:8000/mcp/
 ```
 
+## Remote Claude Connector Authentication
+
+Do not expose `/mcp/` on the public internet without authentication. The server supports
+OAuth for Claude custom connectors when these values are set in `mcp_server\.env`:
+
+```env
+MCP_AUTH_ENABLED=true
+MCP_PUBLIC_URL=https://raz.942778.online
+MCP_AUTH_APPROVAL_PASSWORD=<set-a-long-private-password>
+MCP_AUTH_SCOPES=graphiti:read graphiti:write
+MCP_AUTH_TOKEN_TTL_SECONDS=2592000
+```
+
+Keep `/health` public for uptime checks, but protect `/mcp/` through the built-in OAuth
+flow. In Claude's custom connector form:
+
+```text
+Name: Graphiti Memory
+Remote MCP server URL: https://raz.942778.online/mcp/
+OAuth Client ID: leave blank unless you intentionally pre-register a client
+OAuth Client Secret: leave blank unless you intentionally pre-register a client
+```
+
+When Claude later prompts you to connect, enter `MCP_AUTH_APPROVAL_PASSWORD` on the
+Graphiti authorization page. Tokens are kept in memory and are invalidated when the MCP
+server restarts.
+
 ## Switching Plan A And Plan B
 
 Plan A, Google AI Studio direct:
@@ -218,7 +245,9 @@ scripts\test_embedding.py
 scripts\test_gemini_embedding.py
 scripts\test_openrouter_embedding.py
 mcp_server\src\services\cross_encoder.py
+mcp_server\src\services\oauth_provider.py
 mcp_server\src\services\openrouter_embedder.py
+mcp_server\tests\test_oauth_provider.py
 ```
 
 Modified:
@@ -234,6 +263,7 @@ mcp_server\pyproject.toml
 mcp_server\src\config\schema.py
 mcp_server\src\graphiti_mcp_server.py
 mcp_server\src\services\factories.py
+mcp_server\tests\test_configuration.py
 ```
 
 ## Rollback
@@ -242,11 +272,11 @@ Restore modified tracked files:
 
 ```powershell
 Set-Location H:\AI-Memory\graphiti
-git restore .env.example .gitignore graphiti_core\driver\kuzu_driver.py mcp_server\.env.example mcp_server\README.md mcp_server\config\config.yaml mcp_server\pyproject.toml mcp_server\src\config\schema.py mcp_server\src\graphiti_mcp_server.py mcp_server\src\services\factories.py
+git restore .env.example .gitignore graphiti_core\driver\kuzu_driver.py mcp_server\.env.example mcp_server\README.md mcp_server\config\config.yaml mcp_server\pyproject.toml mcp_server\src\config\schema.py mcp_server\src\graphiti_mcp_server.py mcp_server\src\services\factories.py mcp_server\tests\test_configuration.py
 ```
 
 Remove added files:
 
 ```powershell
-Remove-Item docs\embedding-setup.md, scripts\test_embedding.py, scripts\test_gemini_embedding.py, scripts\test_openrouter_embedding.py, mcp_server\src\services\cross_encoder.py, mcp_server\src\services\openrouter_embedder.py -Force
+Remove-Item docs\embedding-setup.md, scripts\test_embedding.py, scripts\test_gemini_embedding.py, scripts\test_openrouter_embedding.py, mcp_server\src\services\cross_encoder.py, mcp_server\src\services\oauth_provider.py, mcp_server\src\services\openrouter_embedder.py, mcp_server\tests\test_oauth_provider.py -Force
 ```
