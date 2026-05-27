@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+import asyncio
 import logging
 from typing import Any
 
@@ -146,6 +147,8 @@ class KuzuDriver(GraphDriver):
         super().__init__()
         self._database = db
         self.db = kuzu.Database(db)
+        # Kuzu's Windows native extension can crash on concurrent async queries.
+        self._query_lock = asyncio.Lock()
 
         self.setup_schema()
 
@@ -219,7 +222,8 @@ class KuzuDriver(GraphDriver):
         params.pop('routing_', None)
 
         try:
-            results = await self.client.execute(cypher_query_, parameters=params)
+            async with self._query_lock:
+                results = await self.client.execute(cypher_query_, parameters=params)
         except Exception as e:
             params = {k: (v[:5] if isinstance(v, list) else v) for k, v in params.items()}
             logger.error(f'Error executing Kuzu query: {e}\n{cypher_query_}\n{params}')
@@ -247,7 +251,7 @@ class KuzuDriver(GraphDriver):
     async def build_indices_and_constraints(self, delete_existing: bool = False):
         for query in get_fulltext_indices(GraphProvider.KUZU):
             try:
-                await self.client.execute(query)
+                await self.execute_query(query)
             except RuntimeError as err:
                 if 'already exists' not in str(err):
                     raise
