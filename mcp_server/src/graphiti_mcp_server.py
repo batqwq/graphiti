@@ -209,6 +209,9 @@ def create_auth_components() -> tuple[AuthSettings | None, PasswordOAuthProvider
     client_store_path = os.getenv('MCP_AUTH_CLIENT_STORE_PATH')
     if not client_store_path:
         client_store_path = str(mcp_server_dir / 'data' / 'oauth_clients.json')
+    token_store_path = os.getenv('MCP_AUTH_TOKEN_STORE_PATH')
+    if not token_store_path:
+        token_store_path = str(mcp_server_dir / 'data' / 'oauth_tokens.json')
 
     auth_provider = PasswordOAuthProvider(
         public_url=public_url,
@@ -216,6 +219,7 @@ def create_auth_components() -> tuple[AuthSettings | None, PasswordOAuthProvider
         scopes=scopes,
         token_ttl_seconds=_env_int('MCP_AUTH_TOKEN_TTL_SECONDS', 60 * 60 * 24 * 30),
         client_store_path=client_store_path,
+        token_store_path=token_store_path,
     )
     auth_settings = AuthSettings(
         issuer_url=public_url,

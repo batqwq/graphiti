@@ -122,3 +122,66 @@ async def test_password_oauth_provider_persists_registered_clients(tmp_path):
     reloaded_client = await reloaded_provider.get_client('client-1')
     assert reloaded_client is not None
     assert [str(uri) for uri in reloaded_client.redirect_uris] == ['https://chatgpt.com/callback']
+
+
+@pytest.mark.asyncio
+async def test_password_oauth_provider_persists_tokens(tmp_path):
+    token_store_path = tmp_path / 'oauth_tokens.json'
+    provider = PasswordOAuthProvider(
+        public_url='https://raz.942778.online',
+        approval_password='secret',
+        scopes=['graphiti:read'],
+        token_store_path=token_store_path,
+    )
+    client = OAuthClientInformationFull(
+        client_id='client-1',
+        redirect_uris=['https://claude.ai/callback'],
+        token_endpoint_auth_method='none',
+        scope='graphiti:read',
+    )
+    await provider.register_client(client)
+
+    authorization_url = await provider.authorize(
+        client,
+        AuthorizationParams(
+            state=None,
+            scopes=['graphiti:read'],
+            code_challenge=pkce_challenge('verifier-1'),
+            redirect_uri='https://claude.ai/callback',
+            redirect_uri_provided_explicitly=True,
+            resource='https://raz.942778.online/sse',
+        ),
+    )
+    request_id = parse_qs(urlparse(authorization_url).query)['request_id'][0]
+    redirect_url = provider.complete_authorization(request_id, 'secret')
+    assert redirect_url is not None
+
+    code = parse_qs(urlparse(redirect_url).query)['code'][0]
+    authorization_code = await provider.load_authorization_code(client, code)
+    assert authorization_code is not None
+    token_response = await provider.exchange_authorization_code(client, authorization_code)
+    assert token_response.refresh_token is not None
+
+    reloaded_provider = PasswordOAuthProvider(
+        public_url='https://raz.942778.online',
+        approval_password='secret',
+        scopes=['graphiti:read'],
+        token_store_path=token_store_path,
+    )
+    access_token = await reloaded_provider.load_access_token(token_response.access_token)
+    refresh_token = await reloaded_provider.load_refresh_token(client, token_response.refresh_token)
+
+    assert access_token is not None
+    assert access_token.client_id == 'client-1'
+    assert access_token.resource == 'https://raz.942778.online/sse'
+    assert refresh_token is not None
+    assert refresh_token.client_id == 'client-1'
+
+    await reloaded_provider.revoke_token(access_token)
+    second_reload = PasswordOAuthProvider(
+        public_url='https://raz.942778.online',
+        approval_password='secret',
+        scopes=['graphiti:read'],
+        token_store_path=token_store_path,
+    )
+    assert await second_reload.load_access_token(token_response.access_token) is None

@@ -30,10 +30,10 @@ class PendingAuthorization:
 
 
 class PasswordOAuthProvider:
-    """In-memory OAuth provider with a password-gated authorization page.
+    """Small OAuth provider with a password-gated authorization page.
 
-    This is intentionally small and local-state based. Tokens are invalidated when the MCP
-    server restarts, which is acceptable for a personal self-hosted connector.
+    Registered clients and issued tokens can be persisted locally so trusted MCP clients do not
+    need to re-authorize after a server restart.
     """
 
     def __init__(
@@ -45,6 +45,7 @@ class PasswordOAuthProvider:
         token_ttl_seconds: int = 60 * 60 * 24 * 30,
         auth_code_ttl_seconds: int = 300,
         client_store_path: str | Path | None = None,
+        token_store_path: str | Path | None = None,
     ):
         self.public_url = public_url.rstrip('/')
         self.approval_password = approval_password
@@ -52,6 +53,7 @@ class PasswordOAuthProvider:
         self.token_ttl_seconds = token_ttl_seconds
         self.auth_code_ttl_seconds = auth_code_ttl_seconds
         self.client_store_path = Path(client_store_path) if client_store_path else None
+        self.token_store_path = Path(token_store_path) if token_store_path else None
 
         self.clients: dict[str, OAuthClientInformationFull] = {}
         self.pending_authorizations: dict[str, PendingAuthorization] = {}
@@ -59,6 +61,7 @@ class PasswordOAuthProvider:
         self.access_tokens: dict[str, AccessToken] = {}
         self.refresh_tokens: dict[str, RefreshToken] = {}
         self._load_clients()
+        self._load_tokens()
 
     def _load_clients(self) -> None:
         if self.client_store_path is None or not self.client_store_path.exists():
@@ -90,6 +93,58 @@ class PasswordOAuthProvider:
         self.client_store_path.parent.mkdir(parents=True, exist_ok=True)
         clients = {client_id: client.model_dump(mode='json') for client_id, client in self.clients.items()}
         self.client_store_path.write_text(json.dumps(clients, indent=2, sort_keys=True), encoding='utf-8')
+
+    def _load_tokens(self) -> None:
+        if self.token_store_path is None or not self.token_store_path.exists():
+            return
+
+        try:
+            raw_tokens = json.loads(self.token_store_path.read_text(encoding='utf-8'))
+        except (OSError, json.JSONDecodeError) as error:
+            logger.warning('Failed to load OAuth token store %s: %s', self.token_store_path, error)
+            return
+
+        if not isinstance(raw_tokens, dict):
+            logger.warning('Ignoring OAuth token store %s because it is not an object', self.token_store_path)
+            return
+
+        now = int(time.time())
+        for token_value, token_data in raw_tokens.get('access_tokens', {}).items():
+            try:
+                token = AccessToken.model_validate(token_data)
+            except Exception as error:
+                logger.warning('Ignoring invalid OAuth access token %s: %s', token_value, error)
+                continue
+            if token.expires_at is None or token.expires_at >= now:
+                self.access_tokens[token.token] = token
+
+        for token_value, token_data in raw_tokens.get('refresh_tokens', {}).items():
+            try:
+                token = RefreshToken.model_validate(token_data)
+            except Exception as error:
+                logger.warning('Ignoring invalid OAuth refresh token %s: %s', token_value, error)
+                continue
+            if token.expires_at is None or token.expires_at >= now:
+                self.refresh_tokens[token.token] = token
+
+    def _save_tokens(self) -> None:
+        if self.token_store_path is None:
+            return
+
+        self.token_store_path.parent.mkdir(parents=True, exist_ok=True)
+        tokens = {
+            'access_tokens': {
+                token: access_token.model_dump(mode='json')
+                for token, access_token in self.access_tokens.items()
+            },
+            'refresh_tokens': {
+                token: refresh_token.model_dump(mode='json')
+                for token, refresh_token in self.refresh_tokens.items()
+            },
+        }
+        temp_path = self.token_store_path.with_suffix(f'{self.token_store_path.suffix}.tmp')
+        temp_path.write_text(json.dumps(tokens, indent=2, sort_keys=True), encoding='utf-8')
+        temp_path.replace(self.token_store_path)
 
     async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
         return self.clients.get(client_id)
@@ -165,6 +220,7 @@ class PasswordOAuthProvider:
         token = self.refresh_tokens.get(refresh_token)
         if token and token.expires_at and token.expires_at < int(time.time()):
             self.refresh_tokens.pop(refresh_token, None)
+            self._save_tokens()
             return None
         return token
 
@@ -175,6 +231,7 @@ class PasswordOAuthProvider:
         scopes: list[str],
     ) -> OAuthToken:
         self.refresh_tokens.pop(refresh_token.token, None)
+        self._save_tokens()
         return self._issue_tokens(
             client_id=refresh_token.client_id,
             scopes=scopes,
@@ -184,12 +241,14 @@ class PasswordOAuthProvider:
         access_token = self.access_tokens.get(token)
         if access_token and access_token.expires_at and access_token.expires_at < int(time.time()):
             self.access_tokens.pop(token, None)
+            self._save_tokens()
             return None
         return access_token
 
     async def revoke_token(self, token: AccessToken | RefreshToken) -> None:
         self.access_tokens.pop(token.token, None)
         self.refresh_tokens.pop(token.token, None)
+        self._save_tokens()
 
     def _issue_tokens(
         self,
@@ -217,6 +276,7 @@ class PasswordOAuthProvider:
 
         self.access_tokens[access_token_value] = access_token
         self.refresh_tokens[refresh_token_value] = refresh_token
+        self._save_tokens()
 
         return OAuthToken(
             access_token=access_token_value,
