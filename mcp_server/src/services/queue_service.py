@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import traceback
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from typing import Any
@@ -18,6 +19,14 @@ class QueueService:
         self._episode_queues: dict[str, asyncio.Queue] = {}
         # Dictionary to track if a worker is running for each group_id
         self._queue_workers: dict[str, bool] = {}
+        # Store task references to prevent GC collection.
+        # Python's event loop only keeps weak references to tasks; a task that
+        # isn't referenced elsewhere may get garbage collected mid-execution.
+        self._worker_tasks: dict[str, asyncio.Task] = {}
+        # Global concurrency control: only one episode is processed at a time
+        # across all group_ids. This prevents overwhelming embedding APIs with
+        # concurrent requests when multiple groups are active simultaneously.
+        self._processing_semaphore: asyncio.Semaphore | None = None
         self._active_tasks: dict[str, int] = {}
         self._completed_tasks: dict[str, int] = {}
         self._failed_tasks: dict[str, int] = {}
@@ -26,6 +35,12 @@ class QueueService:
         self._last_error: dict[str, str | None] = {}
         # Store the graphiti client after initialization
         self._graphiti_client: Any = None
+
+    def _ensure_semaphore(self) -> asyncio.Semaphore:
+        """Lazily create the semaphore in the current event loop."""
+        if self._processing_semaphore is None:
+            self._processing_semaphore = asyncio.Semaphore(1)
+        return self._processing_semaphore
 
     async def add_episode_task(
         self, group_id: str, process_func: Callable[[], Awaitable[None]]
@@ -54,18 +69,59 @@ class QueueService:
 
         # Start a worker for this queue if one isn't already running
         if not self._queue_workers.get(group_id, False):
-            self._queue_workers[group_id] = True
-            asyncio.create_task(self._process_episode_queue(group_id))
+            self._start_worker(group_id)
 
         return self._episode_queues[group_id].qsize()
+
+    def _start_worker(self, group_id: str) -> None:
+        """Start a queue worker for the given group_id, saving the task reference."""
+        self._queue_workers[group_id] = True
+        task = asyncio.create_task(
+            self._process_episode_queue(group_id),
+            name=f'episode-worker-{group_id}',
+        )
+        self._worker_tasks[group_id] = task
+        task.add_done_callback(lambda t: self._on_worker_done(group_id, t))
+
+    def _on_worker_done(self, group_id: str, task: asyncio.Task) -> None:
+        """Handle worker task completion or crash.
+
+        If the task raised an unhandled exception and there are still items in
+        the queue, automatically restart the worker so processing can continue.
+        """
+        self._worker_tasks.pop(group_id, None)
+
+        try:
+            exc = task.exception()
+        except asyncio.CancelledError:
+            logger.info(f'Worker task for group_id {group_id} was cancelled')
+            return
+
+        if exc is not None:
+            logger.error(
+                f'CRITICAL: Worker for group_id {group_id} crashed with unhandled exception:\n'
+                f'{"".join(traceback.format_exception(type(exc), exc, exc.__traceback__))}'
+            )
+            # Auto-restart if there are pending items
+            queue = self._episode_queues.get(group_id)
+            if queue is not None and not queue.empty():
+                logger.info(
+                    f'Auto-restarting worker for group_id {group_id} '
+                    f'({queue.qsize()} items remaining in queue)'
+                )
+                self._start_worker(group_id)
+            else:
+                self._queue_workers[group_id] = False
 
     async def _process_episode_queue(self, group_id: str) -> None:
         """Process episodes for a specific group_id sequentially.
 
         This function runs as a long-lived task that processes episodes
-        from the queue one at a time.
+        from the queue one at a time. The global processing semaphore ensures
+        only one episode is being processed at any given time across all groups.
         """
         logger.info(f'Starting episode queue worker for group_id: {group_id}')
+        sem = self._ensure_semaphore()
 
         try:
             while True:
@@ -74,17 +130,31 @@ class QueueService:
                 process_func = await self._episode_queues[group_id].get()
 
                 try:
-                    # Process the episode
-                    self._active_tasks[group_id] = self._active_tasks.get(group_id, 0) + 1
-                    self._last_started_at[group_id] = datetime.now(timezone.utc).isoformat()
-                    self._last_error[group_id] = None
-                    await process_func()
-                    self._completed_tasks[group_id] = self._completed_tasks.get(group_id, 0) + 1
+                    # Acquire the global semaphore to ensure only one episode
+                    # is processed at a time (prevents embedding API overload)
+                    async with sem:
+                        # Process the episode
+                        self._active_tasks[group_id] = self._active_tasks.get(group_id, 0) + 1
+                        self._last_started_at[group_id] = datetime.now(timezone.utc).isoformat()
+                        self._last_error[group_id] = None
+                        logger.info(
+                            f'Starting episode processing for group {group_id} '
+                            f'(queue remaining: {self._episode_queues[group_id].qsize()})'
+                        )
+                        await process_func()
+                        self._completed_tasks[group_id] = (
+                            self._completed_tasks.get(group_id, 0) + 1
+                        )
+                        logger.info(
+                            f'Episode processing completed for group {group_id}'
+                        )
                 except Exception as e:
                     self._failed_tasks[group_id] = self._failed_tasks.get(group_id, 0) + 1
                     self._last_error[group_id] = str(e)
+                    # Log the FULL traceback so we can debug crashes
                     logger.error(
-                        f'Error processing queued episode for group_id {group_id}: {str(e)}'
+                        f'Error processing queued episode for group_id {group_id}:\n'
+                        f'{traceback.format_exc()}'
                     )
                 finally:
                     self._active_tasks[group_id] = max(
@@ -96,7 +166,14 @@ class QueueService:
         except asyncio.CancelledError:
             logger.info(f'Episode queue worker for group_id {group_id} was cancelled')
         except Exception as e:
-            logger.error(f'Unexpected error in queue worker for group_id {group_id}: {str(e)}')
+            # This should ideally never happen since the inner try-except covers
+            # process_func(). But if it does, log full traceback and let
+            # _on_worker_done handle restart.
+            logger.error(
+                f'CRITICAL: Unexpected error in queue worker for group_id {group_id}:\n'
+                f'{traceback.format_exc()}'
+            )
+            raise  # Re-raise so _on_worker_done sees the exception
         finally:
             self._queue_workers[group_id] = False
             logger.info(f'Stopped episode queue worker for group_id: {group_id}')
@@ -205,7 +282,10 @@ class QueueService:
                 logger.info(f'Successfully processed episode {uuid} for group {group_id}')
 
             except Exception as e:
-                logger.error(f'Failed to process episode {uuid} for group {group_id}: {str(e)}')
+                logger.error(
+                    f'Failed to process episode {uuid} for group {group_id}: {str(e)}\n'
+                    f'{traceback.format_exc()}'
+                )
                 raise
 
         # Use the existing add_episode_task method to queue the processing

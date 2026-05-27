@@ -14,9 +14,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+import asyncio
 import logging
-from collections.abc import Iterable
-from typing import TYPE_CHECKING
+import random
+from collections.abc import Awaitable, Callable, Iterable
+from typing import TYPE_CHECKING, TypeVar
 
 if TYPE_CHECKING:
     from google import genai
@@ -40,6 +42,64 @@ logger = logging.getLogger(__name__)
 DEFAULT_EMBEDDING_MODEL = 'text-embedding-001'  # gemini-embedding-001 or text-embedding-005
 
 DEFAULT_BATCH_SIZE = 100
+
+# Retry configuration for embedding API calls
+MAX_RETRIES = 3
+BASE_DELAY = 1.0  # seconds
+
+T = TypeVar('T')
+
+
+async def _retry_with_backoff(
+    func: Callable[[], Awaitable[T]],
+    max_retries: int = MAX_RETRIES,
+    base_delay: float = BASE_DELAY,
+) -> T:
+    """Execute an async function with exponential backoff retry on transient errors.
+
+    Retries on rate-limit (429), server errors (500/502/503), timeouts, and
+    quota-exceeded responses. Non-retriable errors are raised immediately.
+
+    Args:
+        func: An async callable to execute.
+        max_retries: Maximum number of retry attempts.
+        base_delay: Base delay in seconds (doubles each retry).
+
+    Returns:
+        The result of the async callable.
+
+    Raises:
+        The last exception if all retries are exhausted.
+    """
+    last_exception: Exception | None = None
+    for attempt in range(max_retries + 1):
+        try:
+            return await func()
+        except Exception as e:
+            last_exception = e
+            error_str = str(e).lower()
+            is_retriable = any(
+                keyword in error_str
+                for keyword in (
+                    '429', 'rate', 'quota', 'resource_exhausted',
+                    '500', '502', '503',
+                    'timeout', 'unavailable', 'deadline',
+                    'connection', 'reset',
+                )
+            )
+            if not is_retriable or attempt == max_retries:
+                raise
+            # Exponential backoff with jitter
+            delay = base_delay * (2 ** attempt) + random.uniform(0, 0.5)
+            logger.warning(
+                f'Embedding API error (attempt {attempt + 1}/{max_retries + 1}), '
+                f'retrying in {delay:.1f}s: {e}'
+            )
+            await asyncio.sleep(delay)
+
+    # Should not reach here, but satisfy type checker
+    assert last_exception is not None
+    raise last_exception
 
 
 class GeminiEmbedderConfig(EmbedderConfig):
@@ -98,12 +158,19 @@ class GeminiEmbedder(EmbedderClient):
         Returns:
             A list of floats representing the embedding vector.
         """
-        # Generate embeddings
-        result = await self.client.aio.models.embed_content(
-            model=self.config.embedding_model or DEFAULT_EMBEDDING_MODEL,
-            contents=[input_data],  # type: ignore[arg-type]  # mypy fails on broad union type
-            config=types.EmbedContentConfig(output_dimensionality=self.config.embedding_dim),
-        )
+        # Capture variables for the closure
+        model = self.config.embedding_model or DEFAULT_EMBEDDING_MODEL
+        dim = self.config.embedding_dim
+
+        async def _call():
+            return await self.client.aio.models.embed_content(
+                model=model,
+                contents=[input_data],  # type: ignore[arg-type]  # mypy fails on broad union type
+                config=types.EmbedContentConfig(output_dimensionality=dim),
+            )
+
+        # Generate embeddings with retry
+        result = await _retry_with_backoff(_call)
 
         if not result.embeddings or len(result.embeddings) == 0 or not result.embeddings[0].values:
             raise ValueError('No embeddings returned from Gemini API in create()')
@@ -128,20 +195,28 @@ class GeminiEmbedder(EmbedderClient):
 
         batch_size = self.batch_size
         all_embeddings = []
+        model = self.config.embedding_model or DEFAULT_EMBEDDING_MODEL
+        dim = self.config.embedding_dim
 
         # Process inputs in batches
         for i in range(0, len(input_data_list), batch_size):
             batch = input_data_list[i : i + batch_size]
 
             try:
-                # Generate embeddings for this batch
-                result = await self.client.aio.models.embed_content(
-                    model=self.config.embedding_model or DEFAULT_EMBEDDING_MODEL,
-                    contents=batch,  # type: ignore[arg-type]  # mypy fails on broad union type
-                    config=types.EmbedContentConfig(
-                        output_dimensionality=self.config.embedding_dim
-                    ),
-                )
+                # Capture batch in closure for retry
+                current_batch = batch
+
+                async def _batch_call():
+                    return await self.client.aio.models.embed_content(
+                        model=model,
+                        contents=current_batch,  # type: ignore[arg-type]  # mypy fails on broad union type
+                        config=types.EmbedContentConfig(
+                            output_dimensionality=dim
+                        ),
+                    )
+
+                # Generate embeddings for this batch with retry
+                result = await _retry_with_backoff(_batch_call)
 
                 if not result.embeddings or len(result.embeddings) == 0:
                     raise Exception('No embeddings returned')
@@ -160,14 +235,20 @@ class GeminiEmbedder(EmbedderClient):
 
                 for item in batch:
                     try:
-                        # Process each item individually
-                        result = await self.client.aio.models.embed_content(
-                            model=self.config.embedding_model or DEFAULT_EMBEDDING_MODEL,
-                            contents=[item],  # type: ignore[arg-type]  # mypy fails on broad union type
-                            config=types.EmbedContentConfig(
-                                output_dimensionality=self.config.embedding_dim
-                            ),
-                        )
+                        # Capture item in closure for retry
+                        current_item = item
+
+                        async def _single_call():
+                            return await self.client.aio.models.embed_content(
+                                model=model,
+                                contents=[current_item],  # type: ignore[arg-type]  # mypy fails on broad union type
+                                config=types.EmbedContentConfig(
+                                    output_dimensionality=dim
+                                ),
+                            )
+
+                        # Process each item individually with retry
+                        result = await _retry_with_backoff(_single_call)
 
                         if not result.embeddings or len(result.embeddings) == 0:
                             raise ValueError('No embeddings returned from Gemini API')
