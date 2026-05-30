@@ -477,7 +477,7 @@ class EmbedderFactory:
                     embedding_model=config.model or 'gemini-embedding-2',
                     embedding_dim=config.dimensions or 768,
                 )
-                return GeminiEmbedder(config=gemini_config, batch_size=config.batch_size)
+                return RetryableEmbedder(GeminiEmbedder(config=gemini_config, batch_size=config.batch_size))
 
             case 'voyage':
                 if not HAS_VOYAGE_EMBEDDER:
