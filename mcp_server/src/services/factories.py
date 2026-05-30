@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import os
 import random
 
 from config.schema import (
@@ -207,18 +208,24 @@ class RetryableLLMClient(LLMClient):
     """Wraps an LLMClient with exponential-backoff retry on RateLimitError (429).
 
     graphiti-core's OpenAIGenericClient deliberately does NOT retry 429 errors.
-    This wrapper adds that missing behaviour for providers like Fireworks.
+    This wrapper adds that missing behaviour, plus an optional fallback client
+    that is tried when the primary exhausts its retries (e.g. Fireworks → DeepSeek).
     """
 
-    def __init__(self, inner: LLMClient) -> None:
+    def __init__(self, inner: LLMClient, fallback: LLMClient | None = None) -> None:
         self._inner = inner
+        self._fallback = fallback
 
     async def _generate_response(self, *args, **kwargs):
         """Delegate to inner client."""
         return await self._inner._generate_response(*args, **kwargs)
 
     async def generate_response(self, *args, **kwargs):
-        """Retry-enabled version that backoffs on RateLimitError."""
+        """Retry-enabled version that backoffs on RateLimitError.
+
+        Falls back to the secondary client if primary retries are exhausted on
+        a rate-limit (429) error.
+        """
         last_exc: Exception | None = None
         for attempt in range(_MAX_RETRIES + 1):
             try:
@@ -226,14 +233,33 @@ class RetryableLLMClient(LLMClient):
             except Exception as exc:
                 last_exc = exc
                 if not _is_retryable_error(exc) or attempt >= _MAX_RETRIES:
-                    raise
+                    break
                 is_rl = _is_rate_limit_error(exc)
                 delay = _backoff_delay(attempt, is_rl)
                 logger.warning(
-                    'LLM generate_response failed (attempt %d/%d, %.1fs backoff): %s',
+                    'LLM primary failed (attempt %d/%d, %.1fs backoff): %s',
                     attempt + 1, _MAX_RETRIES, delay, exc
                 )
                 await asyncio.sleep(delay)
+
+        # If primary exhausted retries on rate-limit, try fallback
+        if self._fallback is not None and _is_rate_limit_error(last_exc):  # type: ignore[arg-type]
+            logger.warning('LLM primary rate-limited, switching to fallback')
+            for attempt in range(_MAX_RETRIES + 1):
+                try:
+                    return await self._fallback.generate_response(*args, **kwargs)
+                except Exception as exc:
+                    last_exc = exc
+                    if not _is_retryable_error(exc) or attempt >= _MAX_RETRIES:
+                        raise
+                    is_rl = _is_rate_limit_error(exc)
+                    delay = _backoff_delay(attempt, is_rl)
+                    logger.warning(
+                        'LLM fallback failed (attempt %d/%d, %.1fs backoff): %s',
+                        attempt + 1, _MAX_RETRIES, delay, exc
+                    )
+                    await asyncio.sleep(delay)
+
         raise last_exc  # type: ignore[misc]
 
     def __getattr__(self, name: str):
@@ -409,9 +435,31 @@ class LLMClientFactory:
             case _:
                 raise ValueError(f'Unsupported LLM provider: {provider}')
 
-        # Wrap ALL LLM clients with rate-limit retry backoff.
+        # Create fallback LLM client if configured (e.g. DeepSeek for Fireworks rate limits)
+        fallback_provider = os.getenv('FALLBACK_LLM_PROVIDER')
+        fallback_client = None
+        if fallback_provider:
+            fallback_api_key = os.getenv('FALLBACK_LLM_API_KEY', '')
+            fallback_base_url = os.getenv('FALLBACK_LLM_BASE_URL', '')
+            fallback_model = os.getenv('FALLBACK_LLM_MODEL', 'deepseek-chat')
+            if fallback_api_key:
+                fallback_llm_config = GraphitiLLMConfig(
+                    api_key=fallback_api_key,
+                    base_url=fallback_base_url,
+                    model=fallback_model,
+                    temperature=config.temperature,
+                    max_tokens=config.max_tokens,
+                )
+                fallback_client = OpenAIGenericClient(
+                    config=fallback_llm_config, max_tokens=config.max_tokens
+                )
+                logger.info(
+                    'Fallback LLM configured: %s @ %s', fallback_model, fallback_base_url
+                )
+
+        # Wrap ALL LLM clients with rate-limit retry backoff + optional fallback.
         # graphiti-core deliberately skips retrying RateLimitError (429).
-        return RetryableLLMClient(client)
+        return RetryableLLMClient(client, fallback=fallback_client)
 
 
 class EmbedderFactory:
