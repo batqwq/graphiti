@@ -134,171 +134,132 @@ class Progress:
 # ---------------------------------------------------------------------------
 
 
-async def migrate_entities(
-    driver: Any, embedder: OpenRouterBatchEmbedder, batch_size: int, progress: Progress
+async def _migrate_batch(
+    driver: Any,
+    embedder: OpenRouterBatchEmbedder,
+    label: str,
+    read_query: str,
+    write_query: str,
+    batch_size: int,
+    offset: int,
+) -> tuple[int, bool]:
+    """Read one batch, embed, and write via UNWIND in a single transaction.
+
+    Returns (rows_written, has_more).  Raises on dimension mismatch.
+    """
+    records, _summary, _keys = await driver.execute_query(
+        read_query, skip=offset, limit=batch_size,
+    )
+    if not records:
+        return 0, False
+
+    ids = [r["id"] for r in records]
+    texts = [r["text"] for r in records]
+    logger.info("%s batch: offset=%d count=%d", label, offset, len(texts))
+
+    # Embed all texts in one batch call
+    embeddings = await embedder.embed_batch(texts)
+    if len(embeddings) != len(texts):
+        raise RuntimeError(
+            f"{label}: got {len(embeddings)} embeddings for {len(texts)} texts"
+        )
+
+    # Validate every embedding dimension before writing
+    items: list[dict[str, Any]] = []
+    for i, emb in enumerate(embeddings):
+        if len(emb) != embedder.dim:
+            raise RuntimeError(
+                f"{label} elementId={ids[i]!r} text='{texts[i][:80]}': "
+                f"dim={len(emb)}, expected {embedder.dim}"
+            )
+        items.append({"id": ids[i], "emb": emb})
+
+    # UNWIND write in a single transaction
+    await driver.execute_query(write_query, items=items)
+
+    has_more = len(records) >= batch_size
+    logger.info(
+        "%s batch done: offset=%d wrote=%d has_more=%s",
+        label, offset, len(items), has_more,
+    )
+    return len(items), has_more
+
+
+# --- Cypher queries ---
+
+ENTITY_READ = """\
+MATCH (n:Entity)
+WHERE n.name IS NOT NULL AND n.name <> ""
+  AND n.name_embedding_4096 IS NULL
+RETURN elementId(n) AS id, n.name AS text
+ORDER BY elementId(n)
+SKIP $skip LIMIT $limit
+"""
+
+ENTITY_WRITE = """\
+UNWIND $items AS item
+MATCH (n:Entity)
+WHERE elementId(n) = item.id
+SET n.name_embedding_4096 = item.emb
+"""
+
+COMMUNITY_READ = """\
+MATCH (c:Community)
+WHERE c.name IS NOT NULL AND c.name <> ""
+  AND c.name_embedding_4096 IS NULL
+RETURN elementId(c) AS id, c.name AS text
+ORDER BY elementId(c)
+SKIP $skip LIMIT $limit
+"""
+
+COMMUNITY_WRITE = """\
+UNWIND $items AS item
+MATCH (c:Community)
+WHERE elementId(c) = item.id
+SET c.name_embedding_4096 = item.emb
+"""
+
+EDGE_READ = """\
+MATCH ()-[e:RELATES_TO]->()
+WHERE e.fact IS NOT NULL AND e.fact <> ""
+  AND e.fact_embedding_4096 IS NULL
+RETURN elementId(e) AS id, e.fact AS text
+ORDER BY elementId(e)
+SKIP $skip LIMIT $limit
+"""
+
+EDGE_WRITE = """\
+UNWIND $items AS item
+MATCH ()-[e:RELATES_TO]->()
+WHERE elementId(e) = item.id
+SET e.fact_embedding_4096 = item.emb
+"""
+
+
+async def _migrate_loop(
+    driver: Any,
+    embedder: OpenRouterBatchEmbedder,
+    label: str,
+    read_query: str,
+    write_query: str,
+    batch_size: int,
+    progress: Progress,
+    offset_attr: str,
 ) -> int:
-    """Embed Entity.name → n.name_embedding_4096. Returns total migrated."""
+    """Run read→embed→UNWIND-write loop with progress tracking."""
     total = 0
     while True:
-        records, _summary, _keys = await driver.execute_query(
-            """
-            MATCH (n:Entity)
-            WHERE n.name IS NOT NULL AND n.name <> ""
-              AND n.name_embedding_4096 IS NULL
-            RETURN n.name AS name
-            ORDER BY n.name
-            SKIP $skip LIMIT $limit
-            """,
-            skip=progress.entity_offset,
-            limit=batch_size,
+        offset = getattr(progress, offset_attr)
+        wrote, has_more = await _migrate_batch(
+            driver, embedder, label, read_query, write_query,
+            batch_size, offset,
         )
-        if not records:
+        if wrote == 0 and not has_more:
             break
-
-        texts = [r["name"] for r in records]
-        logger.info(
-            "Entity batch: offset=%d count=%d", progress.entity_offset, len(texts)
-        )
-
-        embeddings = await embedder.embed_batch(texts)
-        if len(embeddings) != len(texts):
-            raise RuntimeError(
-                f"Mismatch: got {len(embeddings)} embeddings for {len(texts)} texts"
-            )
-
-        for i, emb in enumerate(embeddings):
-            if len(emb) != embedder.dim:
-                raise RuntimeError(
-                    f"Entity '{texts[i][:80]}': embedding dim={len(emb)}, expected {embedder.dim}"
-                )
-            await driver.execute_query(
-                """
-                MATCH (n:Entity {name: $name})
-                SET n.name_embedding_4096 = $emb
-                """,
-                name=texts[i],
-                emb=emb,
-            )
-
-        total += len(texts)
-        progress.entity_offset += len(texts)
+        total += wrote
+        setattr(progress, offset_attr, offset + wrote)
         progress.save(PROGRESS_FILE)
-        logger.info("Entity batch done: %d total migrated", total)
-
-    logger.info("Entity migration complete: %d total", total)
-    return total
-
-
-async def migrate_communities(
-    driver: Any, embedder: OpenRouterBatchEmbedder, batch_size: int, progress: Progress
-) -> int:
-    """Embed Community.name → c.name_embedding_4096."""
-    total = 0
-    while True:
-        records, _summary, _keys = await driver.execute_query(
-            """
-            MATCH (c:Community)
-            WHERE c.name IS NOT NULL AND c.name <> ""
-              AND c.name_embedding_4096 IS NULL
-            RETURN c.name AS name
-            ORDER BY c.name
-            SKIP $skip LIMIT $limit
-            """,
-            skip=progress.community_offset,
-            limit=batch_size,
-        )
-        if not records:
-            break
-
-        texts = [r["name"] for r in records]
-        logger.info(
-            "Community batch: offset=%d count=%d",
-            progress.community_offset,
-            len(texts),
-        )
-
-        embeddings = await embedder.embed_batch(texts)
-        if len(embeddings) != len(texts):
-            raise RuntimeError(
-                f"Community mismatch: {len(embeddings)} emb for {len(texts)} texts"
-            )
-
-        for i, emb in enumerate(embeddings):
-            if len(emb) != embedder.dim:
-                raise RuntimeError(
-                    f"Community '{texts[i][:80]}': dim={len(emb)}, expected {embedder.dim}"
-                )
-            await driver.execute_query(
-                """
-                MATCH (c:Community {name: $name})
-                SET c.name_embedding_4096 = $emb
-                """,
-                name=texts[i],
-                emb=emb,
-            )
-
-        total += len(texts)
-        progress.community_offset += len(texts)
-        progress.save(PROGRESS_FILE)
-        logger.info("Community batch done: %d total migrated", total)
-
-    logger.info("Community migration complete: %d total", total)
-    return total
-
-
-async def migrate_edges(
-    driver: Any, embedder: OpenRouterBatchEmbedder, batch_size: int, progress: Progress
-) -> int:
-    """Embed RELATES_TO.fact → e.fact_embedding_4096 (directed match)."""
-    total = 0
-    while True:
-        records, _summary, _keys = await driver.execute_query(
-            """
-            MATCH ()-[e:RELATES_TO]->()
-            WHERE e.fact IS NOT NULL AND e.fact <> ""
-              AND e.fact_embedding_4096 IS NULL
-            RETURN e.fact AS fact
-            ORDER BY e.fact
-            SKIP $skip LIMIT $limit
-            """,
-            skip=progress.edge_offset,
-            limit=batch_size,
-        )
-        if not records:
-            break
-
-        texts = [r["fact"] for r in records]
-        logger.info(
-            "Edge batch: offset=%d count=%d", progress.edge_offset, len(texts)
-        )
-
-        embeddings = await embedder.embed_batch(texts)
-        if len(embeddings) != len(texts):
-            raise RuntimeError(
-                f"Edge mismatch: {len(embeddings)} emb for {len(texts)} texts"
-            )
-
-        for i, emb in enumerate(embeddings):
-            if len(emb) != embedder.dim:
-                raise RuntimeError(
-                    f"Edge fact '{texts[i][:80]}': dim={len(emb)}, expected {embedder.dim}"
-                )
-            await driver.execute_query(
-                """
-                MATCH ()-[e:RELATES_TO]->()
-                WHERE e.fact = $fact
-                SET e.fact_embedding_4096 = $emb
-                """,
-                fact=texts[i],
-                emb=emb,
-            )
-
-        total += len(texts)
-        progress.edge_offset += len(texts)
-        progress.save(PROGRESS_FILE)
-        logger.info("Edge batch done: %d total migrated", total)
-
-    logger.info("Edge migration complete: %d total", total)
+    logger.info("%s migration complete: %d total", label, total)
     return total
 
 
@@ -363,20 +324,26 @@ async def main() -> None:
 
     try:
         # --- Entities ---
-        entity_count = await migrate_entities(
-            driver, embedder, args.batch_size, progress
+        entity_count = await _migrate_loop(
+            driver, embedder, "Entity",
+            ENTITY_READ, ENTITY_WRITE,
+            args.batch_size, progress, "entity_offset",
         )
         logger.info("Entities migrated: %d", entity_count)
 
         # --- Communities ---
-        community_count = await migrate_communities(
-            driver, embedder, args.batch_size, progress
+        community_count = await _migrate_loop(
+            driver, embedder, "Community",
+            COMMUNITY_READ, COMMUNITY_WRITE,
+            args.batch_size, progress, "community_offset",
         )
         logger.info("Communities migrated: %d", community_count)
 
         # --- Edges ---
-        edge_count = await migrate_edges(
-            driver, embedder, args.batch_size, progress
+        edge_count = await _migrate_loop(
+            driver, embedder, "Edge",
+            EDGE_READ, EDGE_WRITE,
+            args.batch_size, progress, "edge_offset",
         )
         logger.info("Edges migrated: %d", edge_count)
 
