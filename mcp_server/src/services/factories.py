@@ -9,6 +9,7 @@ from config.schema import (
     EmbedderConfig,
     LLMConfig,
 )
+from graphiti_core.embedder.client import EmbedderClient
 
 logger = logging.getLogger(__name__)
 
@@ -59,13 +60,10 @@ def _backoff_delay(attempt: int, is_rate_limit: bool) -> float:
     return _BASE_DELAY * (2 ** attempt) + random.uniform(0, 0.5)
 
 
-class RetryableEmbedder:
-    """Wraps an EmbedderClient with exponential-backoff retry for transient errors.
+class RetryableEmbedder(EmbedderClient):
+    """Wraps an EmbedderClient with exponential-backoff retry for transient errors."""
 
-    Gemini embedder already has its own retry, so it should NOT be wrapped.
-    """
-
-    def __init__(self, inner: 'EmbedderClient') -> None:  # noqa: F821
+    def __init__(self, inner: EmbedderClient) -> None:
         self._inner = inner
 
     async def create(
