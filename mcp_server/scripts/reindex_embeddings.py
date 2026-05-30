@@ -174,15 +174,22 @@ async def _migrate_batch(
             )
         items.append({"id": ids[i], "emb": emb})
 
-    # UNWIND write in a single transaction
-    await driver.execute_query(write_query, items=items)
+    # UNWIND write in a single transaction, verify updated count
+    result, _summary, _keys = await driver.execute_query(
+        write_query, items=items,
+    )
+    updated = result[0]["updated_count"] if result else 0
+    if updated != len(items):
+        raise RuntimeError(
+            f"{label}: UNWIND count mismatch: updated {updated}, expected {len(items)}"
+        )
 
     has_more = len(records) >= batch_size
     logger.info(
-        "%s batch done: offset=%d wrote=%d has_more=%s",
-        label, offset, len(items), has_more,
+        "%s batch done: offset=%d wrote=%d updated=%d has_more=%s",
+        label, offset, len(items), updated, has_more,
     )
-    return len(items), has_more
+    return updated, has_more
 
 
 # --- Cypher queries ---
@@ -201,6 +208,7 @@ UNWIND $items AS item
 MATCH (n:Entity)
 WHERE elementId(n) = item.id
 SET n.name_embedding_4096 = item.emb
+RETURN count(n) AS updated_count
 """
 
 COMMUNITY_READ = """\
@@ -217,6 +225,7 @@ UNWIND $items AS item
 MATCH (c:Community)
 WHERE elementId(c) = item.id
 SET c.name_embedding_4096 = item.emb
+RETURN count(c) AS updated_count
 """
 
 EDGE_READ = """\
@@ -233,6 +242,7 @@ UNWIND $items AS item
 MATCH ()-[e:RELATES_TO]->()
 WHERE elementId(e) = item.id
 SET e.fact_embedding_4096 = item.emb
+RETURN count(e) AS updated_count
 """
 
 
