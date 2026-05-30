@@ -197,7 +197,6 @@ async def _migrate_batch(
 ENTITY_READ = """\
 MATCH (n:Entity)
 WHERE n.name IS NOT NULL AND n.name <> ""
-  AND n.name_embedding_4096 IS NULL
 RETURN elementId(n) AS id, n.name AS text
 ORDER BY elementId(n)
 SKIP $skip LIMIT $limit
@@ -214,7 +213,6 @@ RETURN count(n) AS updated_count
 COMMUNITY_READ = """\
 MATCH (c:Community)
 WHERE c.name IS NOT NULL AND c.name <> ""
-  AND c.name_embedding_4096 IS NULL
 RETURN elementId(c) AS id, c.name AS text
 ORDER BY elementId(c)
 SKIP $skip LIMIT $limit
@@ -231,7 +229,6 @@ RETURN count(c) AS updated_count
 EDGE_READ = """\
 MATCH ()-[e:RELATES_TO]->()
 WHERE e.fact IS NOT NULL AND e.fact <> ""
-  AND e.fact_embedding_4096 IS NULL
 RETURN elementId(e) AS id, e.fact AS text
 ORDER BY elementId(e)
 SKIP $skip LIMIT $limit
