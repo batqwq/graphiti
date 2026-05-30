@@ -33,6 +33,8 @@ class QueueService:
         self._last_started_at: dict[str, str | None] = {}
         self._last_finished_at: dict[str, str | None] = {}
         self._last_error: dict[str, str | None] = {}
+        # Store failed episode metadata for retry (keyed by group_id)
+        self._failed_items: dict[str, list[dict[str, Any]]] = {}
         # Store the graphiti client after initialization
         self._graphiti_client: Any = None
 
@@ -63,6 +65,7 @@ class QueueService:
             self._last_started_at[group_id] = None
             self._last_finished_at[group_id] = None
             self._last_error[group_id] = None
+            self._failed_items[group_id] = []
 
         # Add the episode processing function to the queue
         await self._episode_queues[group_id].put(process_func)
@@ -226,6 +229,71 @@ class QueueService:
             'groups': groups,
         }
 
+    def get_failed_episodes(self, group_id: str | None = None) -> dict[str, Any]:
+        """Get all failed episodes, optionally filtered by group_id.
+
+        Returns:
+            dict with total_failed and per-group lists of FailedEpisode dicts.
+        """
+        if group_id is not None:
+            items = self._failed_items.get(group_id, [])
+            return {
+                'total_failed': len(items),
+                'groups': {group_id: items} if items else {},
+            }
+        all_groups = {
+            gid: items
+            for gid, items in self._failed_items.items()
+            if items
+        }
+        total = sum(len(v) for v in all_groups.values())
+        return {'total_failed': total, 'groups': all_groups}
+
+    def clear_failed_episodes(self, group_id: str | None = None) -> int:
+        """Clear failed episode records. Returns number of items cleared."""
+        if group_id is not None:
+            count = len(self._failed_items.get(group_id, []))
+            self._failed_items[group_id] = []
+            self._failed_tasks[group_id] = 0
+            return count
+        total = 0
+        for gid in list(self._failed_items.keys()):
+            total += len(self._failed_items[gid])
+            self._failed_items[gid] = []
+            self._failed_tasks[gid] = 0
+        return total
+
+    async def retry_failed_episodes(self, group_id: str | None = None) -> int:
+        """Re-queue all failed episodes for retry. Returns number re-queued."""
+        target_groups = (
+            [group_id]
+            if group_id is not None
+            else [gid for gid, items in self._failed_items.items() if items]
+        )
+        retried = 0
+        for gid in target_groups:
+            items = self._failed_items.get(gid, [])
+            if not items:
+                continue
+            for item in items:
+                # Re-add the episode using add_episode (not add_episode_task directly)
+                # so the standard queue/worker lifecycle applies
+                await self.add_episode(
+                    group_id=item['group_id'],
+                    name=item['name'],
+                    content=item['content'],
+                    source_description=item['source_description'],
+                    episode_type=item['source'],
+                    entity_types=None,
+                    uuid=item.get('uuid'),
+                )
+                retried += 1
+            # Clear the failed items for this group after re-queuing
+            self._failed_items[gid] = []
+            self._failed_tasks[gid] = 0
+            logger.info(f'Re-queued {len(items)} failed episodes for group {gid}')
+        return retried
+
     async def initialize(self, graphiti_client: Any) -> None:
         """Initialize the queue service with a graphiti client.
 
@@ -286,6 +354,19 @@ class QueueService:
                     f'Failed to process episode {uuid} for group {group_id}: {str(e)}\n'
                     f'{traceback.format_exc()}'
                 )
+                # Persist failed episode metadata so it can be retried later
+                self._failed_items.setdefault(group_id, []).append({
+                    'name': name,
+                    'content': content,
+                    'source_description': source_description,
+                    'source': episode_type.value
+                    if hasattr(episode_type, 'value')
+                    else str(episode_type),
+                    'group_id': group_id,
+                    'uuid': uuid,
+                    'error': str(e),
+                    'failed_at': datetime.now(timezone.utc).isoformat(),
+                })
                 raise
 
         # Use the existing add_episode_task method to queue the processing
