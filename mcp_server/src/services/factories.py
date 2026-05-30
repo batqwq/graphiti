@@ -69,7 +69,7 @@ class RetryableEmbedder:
         self._inner = inner
 
     async def create(
-        self, input_data: str | list[str] | 'Iterable[int] | Iterable[Iterable[int]]'
+        self, input_data: str | list[str] | list[int] | list[list[int]]
     ) -> list[float]:
         last_exc: Exception | None = None
         for attempt in range(_MAX_RETRIES + 1):

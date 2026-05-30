@@ -30,6 +30,7 @@ from config.schema import GraphitiConfig, ServerConfig
 from models.response_types import (
     EpisodeSearchResponse,
     ErrorResponse,
+    FailedEpisodesResponse,
     FactSearchResponse,
     NodeSearchResponse,
     QueueStatusResponse,
@@ -582,6 +583,73 @@ async def get_memory_queue_status(group_id: str | None = None) -> QueueStatusRes
         return ErrorResponse(error='Queue service not initialized')
 
     return queue_service.get_queue_status(group_id)
+
+
+@mcp.tool()
+async def get_failed_memories(group_id: str | None = None) -> FailedEpisodesResponse | ErrorResponse:
+    """List episodes that failed during background processing.
+
+    Use this to inspect failed episodes before retrying them with retry_failed_memories.
+
+    Args:
+        group_id: Optional memory group to filter. If omitted, returns all groups.
+    """
+    global queue_service
+
+    if queue_service is None:
+        return ErrorResponse(error='Queue service not initialized')
+
+    result = queue_service.get_failed_episodes(group_id)
+    return FailedEpisodesResponse(
+        message=(
+            f'{result["total_failed"]} failed episode(s) across '
+            f'{len(result["groups"])} group(s)'
+        ),
+        total_failed=result['total_failed'],
+        groups=result['groups'],
+    )
+
+
+@mcp.tool()
+async def retry_failed_memories(group_id: str | None = None) -> SuccessResponse | ErrorResponse:
+    """Re-queue all failed episodes back into the processing pipeline.
+
+    Each failed episode is re-added to its queue and will be processed by the
+    background worker. Failed items are cleared from the failure list after
+    re-queuing.
+
+    Args:
+        group_id: Optional memory group to retry. If omitted, retries all groups.
+    """
+    global queue_service
+
+    if queue_service is None:
+        return ErrorResponse(error='Queue service not initialized')
+
+    retried = await queue_service.retry_failed_episodes(group_id)
+    return SuccessResponse(
+        message=f'{retried} failed episode(s) re-queued for retry'
+    )
+
+
+@mcp.tool()
+async def clear_failed_memories(group_id: str | None = None) -> SuccessResponse | ErrorResponse:
+    """Discard all failed episodes without retrying them.
+
+    Use this when you want to permanently drop failed episodes that are not worth retrying.
+
+    Args:
+        group_id: Optional memory group to clear. If omitted, clears all groups.
+    """
+    global queue_service
+
+    if queue_service is None:
+        return ErrorResponse(error='Queue service not initialized')
+
+    cleared = queue_service.clear_failed_episodes(group_id)
+    return SuccessResponse(
+        message=f'{cleared} failed episode(s) discarded'
+    )
 
 
 @mcp.tool()
