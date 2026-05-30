@@ -204,6 +204,26 @@ def _validate_api_key(provider_name: str, api_key: str | None, logger) -> str:
     return api_key
 
 
+def _make_openai_client(
+    llm_config, max_tokens: int, extra_body: dict[str, str] | None = None
+):
+    """Create an OpenAIGenericClient, optionally injecting extra_body into API calls.
+
+    extra_body is passed as-is to the OpenAI chat.completions.create() call,
+    allowing provider-specific parameters (e.g. reasoning_effort for DeepSeek).
+    """
+    client = OpenAIGenericClient(config=llm_config, max_tokens=max_tokens)
+    if extra_body:
+        _orig_create = client.client.chat.completions.create
+
+        async def _create_with_extra_body(**kwargs):
+            kwargs.setdefault('extra_body', {}).update(extra_body)
+            return await _orig_create(**kwargs)
+
+        client.client.chat.completions.create = _create_with_extra_body  # type: ignore[method-assign]
+    return client
+
+
 class RetryableLLMClient(LLMClient):
     """Wraps an LLMClient with exponential-backoff retry on RateLimitError (429).
 
@@ -450,8 +470,10 @@ class LLMClientFactory:
                     temperature=config.temperature,
                     max_tokens=config.max_tokens,
                 )
-                fallback_client = OpenAIGenericClient(
-                    config=fallback_llm_config, max_tokens=config.max_tokens
+                fallback_client = _make_openai_client(
+                    fallback_llm_config,
+                    max_tokens=config.max_tokens,
+                    extra_body={'reasoning_effort': 'max'},
                 )
                 logger.info(
                     'Fallback LLM configured: %s @ %s', fallback_model, fallback_base_url
