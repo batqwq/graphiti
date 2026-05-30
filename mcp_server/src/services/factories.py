@@ -1,10 +1,112 @@
 """Factory classes for creating LLM, Embedder, and Database clients."""
 
+import asyncio
+import logging
+import random
+
 from config.schema import (
     DatabaseConfig,
     EmbedderConfig,
     LLMConfig,
 )
+
+logger = logging.getLogger(__name__)
+
+# ---- Embedding retry utilities ----
+
+_RETRYABLE_STATUSES: set[int] = {429, 500, 502, 503, 504}
+_RETRYABLE_KEYWORDS: tuple[str, ...] = (
+    'rate', 'quota', 'resource_exhausted',
+    'timeout', 'unavailable', 'deadline',
+    'connection', 'reset',
+)
+_MAX_RETRIES: int = 3
+_BASE_DELAY: float = 1.0
+_RATE_LIMIT_DELAY: float = 30.0
+
+
+def _is_retryable_error(exception: Exception) -> bool:
+    """Check whether an embedding error is retryable (429, 5xx, timeout, connection)."""
+    error_str = str(exception).lower()
+    # Check HTTP status codes
+    for status in _RETRYABLE_STATUSES:
+        if str(status) in error_str:
+            return True
+    # Check known error keywords
+    for keyword in _RETRYABLE_KEYWORDS:
+        if keyword in error_str:
+            return True
+    # Check for common exception types
+    if isinstance(exception, (asyncio.TimeoutError, ConnectionError, TimeoutError)):
+        return True
+    # Check for httpx / aiohttp timeouts
+    type_name = type(exception).__name__.lower()
+    if 'timeout' in type_name or 'connection' in type_name:
+        return True
+    return False
+
+
+def _is_rate_limit_error(exception: Exception) -> bool:
+    """Check whether an error is specifically a 429 rate limit."""
+    error_str = str(exception).lower()
+    return '429' in error_str or 'rate' in error_str or 'quota' in error_str
+
+
+def _backoff_delay(attempt: int, is_rate_limit: bool) -> float:
+    """Compute backoff delay: 30s + jitter for 429, exponential for others."""
+    if is_rate_limit:
+        return _RATE_LIMIT_DELAY + random.uniform(0, 5)
+    return _BASE_DELAY * (2 ** attempt) + random.uniform(0, 0.5)
+
+
+class RetryableEmbedder:
+    """Wraps an EmbedderClient with exponential-backoff retry for transient errors.
+
+    Gemini embedder already has its own retry, so it should NOT be wrapped.
+    """
+
+    def __init__(self, inner: 'EmbedderClient') -> None:  # noqa: F821
+        self._inner = inner
+
+    async def create(
+        self, input_data: str | list[str] | 'Iterable[int] | Iterable[Iterable[int]]'
+    ) -> list[float]:
+        last_exc: Exception | None = None
+        for attempt in range(_MAX_RETRIES + 1):
+            try:
+                return await self._inner.create(input_data)
+            except Exception as exc:
+                last_exc = exc
+                if not _is_retryable_error(exc) or attempt >= _MAX_RETRIES:
+                    raise
+                is_rl = _is_rate_limit_error(exc)
+                delay = _backoff_delay(attempt, is_rl)
+                logger.warning(
+                    'Embedding create failed (attempt %d/%d, %.1fs backoff): %s',
+                    attempt + 1, _MAX_RETRIES, delay, exc
+                )
+                await asyncio.sleep(delay)
+        raise last_exc  # type: ignore[misc]
+
+    async def create_batch(self, input_data_list: list[str]) -> list[list[float]]:
+        last_exc: Exception | None = None
+        for attempt in range(_MAX_RETRIES + 1):
+            try:
+                return await self._inner.create_batch(input_data_list)
+            except NotImplementedError:
+                raise
+            except Exception as exc:
+                last_exc = exc
+                if not _is_retryable_error(exc) or attempt >= _MAX_RETRIES:
+                    raise
+                is_rl = _is_rate_limit_error(exc)
+                delay = _backoff_delay(attempt, is_rl)
+                logger.warning(
+                    'Embedding create_batch failed (attempt %d/%d, %.1fs backoff): %s',
+                    attempt + 1, _MAX_RETRIES, delay, exc
+                )
+                await asyncio.sleep(delay)
+        raise last_exc  # type: ignore[misc]
 
 # Try to import FalkorDriver if available
 try:
@@ -300,7 +402,7 @@ class EmbedderFactory:
                     base_url=config.providers.openai.api_url,  # Support custom endpoints like Ollama
                     embedding_dim=config.dimensions,  # Support custom embedding dimensions
                 )
-                return OpenAIEmbedder(config=embedder_config)
+                return RetryableEmbedder(OpenAIEmbedder(config=embedder_config))
 
             case 'openrouter':
                 if not config.providers.openrouter:
@@ -317,7 +419,7 @@ class EmbedderFactory:
                     embedding_dim=config.dimensions,
                     batch_size=config.batch_size,
                 )
-                return OpenRouterEmbedder(config=embedder_config)
+                return RetryableEmbedder(OpenRouterEmbedder(config=embedder_config))
 
             case 'azure_openai':
                 if not HAS_AZURE_EMBEDDER:
@@ -352,10 +454,10 @@ class EmbedderFactory:
                     api_key=api_key,
                 )
 
-                return AzureOpenAIEmbedderClient(
+                return RetryableEmbedder(AzureOpenAIEmbedderClient(
                     azure_client=azure_client,
                     model=config.model or 'text-embedding-3-small',
-                )
+                ))
 
             case 'gemini':
                 if not HAS_GEMINI_EMBEDDER:
@@ -395,7 +497,7 @@ class EmbedderFactory:
                     embedding_model=config.model or 'voyage-3',
                     embedding_dim=config.dimensions or 1024,
                 )
-                return VoyageAIEmbedder(config=voyage_config)
+                return RetryableEmbedder(VoyageAIEmbedder(config=voyage_config))
 
             case _:
                 raise ValueError(f'Unsupported Embedder provider: {provider}')
