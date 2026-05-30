@@ -62,3 +62,20 @@ class QueueStatusResponse(TypedDict):
     total_completed: int
     total_failed: int
     groups: dict[str, QueueGroupStatus]
+
+
+class FailedEpisode(TypedDict):
+    name: str
+    content: str
+    source_description: str
+    source: str
+    group_id: str
+    uuid: str | None
+    error: str
+    failed_at: str
+
+
+class FailedEpisodesResponse(TypedDict):
+    message: str
+    total_failed: int
+    groups: dict[str, list[FailedEpisode]]
