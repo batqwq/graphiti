@@ -203,6 +203,44 @@ def _validate_api_key(provider_name: str, api_key: str | None, logger) -> str:
     return api_key
 
 
+class RetryableLLMClient(LLMClient):
+    """Wraps an LLMClient with exponential-backoff retry on RateLimitError (429).
+
+    graphiti-core's OpenAIGenericClient deliberately does NOT retry 429 errors.
+    This wrapper adds that missing behaviour for providers like Fireworks.
+    """
+
+    def __init__(self, inner: LLMClient) -> None:
+        self._inner = inner
+
+    async def _generate_response(self, *args, **kwargs):
+        """Delegate to inner client."""
+        return await self._inner._generate_response(*args, **kwargs)
+
+    async def generate_response(self, *args, **kwargs):
+        """Retry-enabled version that backoffs on RateLimitError."""
+        last_exc: Exception | None = None
+        for attempt in range(_MAX_RETRIES + 1):
+            try:
+                return await self._inner.generate_response(*args, **kwargs)
+            except Exception as exc:
+                last_exc = exc
+                if not _is_retryable_error(exc) or attempt >= _MAX_RETRIES:
+                    raise
+                is_rl = _is_rate_limit_error(exc)
+                delay = _backoff_delay(attempt, is_rl)
+                logger.warning(
+                    'LLM generate_response failed (attempt %d/%d, %.1fs backoff): %s',
+                    attempt + 1, _MAX_RETRIES, delay, exc
+                )
+                await asyncio.sleep(delay)
+        raise last_exc  # type: ignore[misc]
+
+    def __getattr__(self, name: str):
+        """Delegate all other attribute access to the inner client."""
+        return getattr(self._inner, name)
+
+
 class LLMClientFactory:
     """Factory for creating LLM clients based on configuration."""
 
@@ -242,10 +280,10 @@ class LLMClientFactory:
 
                 # Only pass reasoning/verbosity parameters for reasoning models (gpt-5 family)
                 if is_reasoning_model:
-                    return OpenAIClient(config=llm_config, reasoning='minimal', verbosity='low')
+                    client = OpenAIClient(config=llm_config, reasoning='minimal', verbosity='low')
                 else:
                     # For non-reasoning models, explicitly pass None to disable these parameters
-                    return OpenAIClient(config=llm_config, reasoning=None, verbosity=None)
+                    client = OpenAIClient(config=llm_config, reasoning=None, verbosity=None)
 
             case 'azure_openai':
                 if not HAS_AZURE_LLM:
@@ -291,7 +329,7 @@ class LLMClientFactory:
                     max_tokens=config.max_tokens,
                 )
 
-                return AzureOpenAILLMClient(
+                client = AzureOpenAILLMClient(
                     azure_client=azure_client,
                     config=llm_config,
                     max_tokens=config.max_tokens,
@@ -314,7 +352,7 @@ class LLMClientFactory:
                     temperature=config.temperature,
                     max_tokens=config.max_tokens,
                 )
-                return AnthropicClient(config=llm_config)
+                client = AnthropicClient(config=llm_config)
 
             case 'gemini':
                 if not HAS_GEMINI:
@@ -331,7 +369,7 @@ class LLMClientFactory:
                     temperature=config.temperature,
                     max_tokens=config.max_tokens,
                 )
-                return GeminiClient(config=llm_config)
+                client = GeminiClient(config=llm_config)
 
             case 'groq':
                 if not HAS_GROQ:
@@ -349,7 +387,7 @@ class LLMClientFactory:
                     temperature=config.temperature,
                     max_tokens=config.max_tokens,
                 )
-                return GroqClient(config=llm_config)
+                client = GroqClient(config=llm_config)
 
             case 'fireworks':
                 if not config.providers.fireworks:
@@ -366,10 +404,14 @@ class LLMClientFactory:
                     temperature=config.temperature,
                     max_tokens=config.max_tokens,
                 )
-                return OpenAIGenericClient(config=llm_config, max_tokens=config.max_tokens)
+                client = OpenAIGenericClient(config=llm_config, max_tokens=config.max_tokens)
 
             case _:
                 raise ValueError(f'Unsupported LLM provider: {provider}')
+
+        # Wrap ALL LLM clients with rate-limit retry backoff.
+        # graphiti-core deliberately skips retrying RateLimitError (429).
+        return RetryableLLMClient(client)
 
 
 class EmbedderFactory:
