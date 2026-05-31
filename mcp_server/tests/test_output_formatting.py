@@ -78,15 +78,26 @@ def test_format_fact_result_can_return_minimal_search_shape():
 
 
 def test_format_node_result_can_return_minimal_search_shape():
-    node = SimpleNamespace(uuid='node-1', name='Alice', summary='Engineer')
+    node = SimpleNamespace(
+        uuid='node-1',
+        name='Alice',
+        labels=['Entity', 'Person'],
+        created_at=None,
+        summary='Engineer',
+        group_id='main',
+        attributes={'notes': 'x' * 2000, 'name_embedding': [0.1]},
+    )
 
     result = format_node_result(node, minimal=True)
 
-    assert result == {
-        'uuid': 'node-1',
-        'name': 'Alice',
-        'summary': 'Engineer',
-    }
+    assert result['uuid'] == 'node-1'
+    assert result['name'] == 'Alice'
+    assert result['labels'] == ['Entity', 'Person']
+    assert result['created_at'] is None
+    assert result['summary'] == 'Engineer'
+    assert result['group_id'] == 'main'
+    assert result['attributes']['notes'].endswith(']')
+    assert 'name_embedding' not in result['attributes']
 
 
 def test_format_episode_result_truncates_content_by_default():

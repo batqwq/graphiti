@@ -13,7 +13,7 @@ class SuccessResponse(TypedDict):
     message: str
 
 
-class NodeResult(TypedDict, total=False):
+class NodeResult(TypedDict):
     uuid: str
     name: str
     labels: list[str]

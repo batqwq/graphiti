@@ -117,10 +117,15 @@ def compact_value(
 def format_node_result(node: EntityNode, *, minimal: bool = False) -> dict[str, Any]:
     """Format an entity node for MCP output."""
     if minimal:
+        created_at = getattr(node, 'created_at', None)
         return {
             'uuid': node.uuid,
             'name': node.name,
+            'labels': list(getattr(node, 'labels', []) or []),
+            'created_at': created_at.isoformat() if hasattr(created_at, 'isoformat') else created_at,
             'summary': node.summary,
+            'group_id': getattr(node, 'group_id', '') or '',
+            'attributes': compact_value(getattr(node, 'attributes', {}) or {}),
         }
 
     result = node.model_dump(
