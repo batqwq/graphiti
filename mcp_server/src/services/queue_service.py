@@ -165,7 +165,7 @@ class QueueService:
                     self._episode_queues[group_id].task_done()
         except asyncio.CancelledError:
             logger.info(f'Episode queue worker for group_id {group_id} was cancelled')
-        except Exception as e:
+        except Exception:
             # This should ideally never happen since the inner try-except covers
             # process_func(). But if it does, log full traceback and let
             # _on_worker_done handle restart.

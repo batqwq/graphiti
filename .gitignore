@@ -166,6 +166,7 @@ cache.db*
 data/
 logs/
 .tmp/
+mcp_server/scripts/migration_progress.json
 .uv-cache/
 
 # All DS_Store files

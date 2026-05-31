@@ -5,6 +5,7 @@ from utils.formatting import (
     compact_value,
     format_episode_result,
     format_fact_result,
+    format_node_result,
     truncate_text,
 )
 
@@ -62,6 +63,30 @@ def test_format_fact_result_drops_embeddings_and_truncates_text():
     assert 'fact_embedding' not in result['attributes']
     assert result['fact'].endswith(']')
     assert result['attributes']['notes'].endswith(']')
+
+
+def test_format_fact_result_can_return_minimal_search_shape():
+    edge = SimpleNamespace(uuid='edge-1', name='RELATES_TO', fact='Alice knows Bob')
+
+    result = format_fact_result(edge, minimal=True)
+
+    assert result == {
+        'uuid': 'edge-1',
+        'name': 'RELATES_TO',
+        'fact': 'Alice knows Bob',
+    }
+
+
+def test_format_node_result_can_return_minimal_search_shape():
+    node = SimpleNamespace(uuid='node-1', name='Alice', summary='Engineer')
+
+    result = format_node_result(node, minimal=True)
+
+    assert result == {
+        'uuid': 'node-1',
+        'name': 'Alice',
+        'summary': 'Engineer',
+    }
 
 
 def test_format_episode_result_truncates_content_by_default():

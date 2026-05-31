@@ -114,22 +114,40 @@ def compact_value(
     return truncate_text(str(value), max_text_chars)
 
 
-def format_node_result(node: EntityNode) -> dict[str, Any]:
-    """Format an entity node into a minimal result (uuid, name, summary only)."""
-    return {
-        'uuid': node.uuid,
-        'name': node.name,
-        'summary': node.summary,
-    }
+def format_node_result(node: EntityNode, *, minimal: bool = False) -> dict[str, Any]:
+    """Format an entity node for MCP output."""
+    if minimal:
+        return {
+            'uuid': node.uuid,
+            'name': node.name,
+            'summary': node.summary,
+        }
+
+    result = node.model_dump(
+        mode='json',
+        exclude={
+            'name_embedding',
+        },
+    )
+    return compact_value(result)
 
 
-def format_fact_result(edge: EntityEdge) -> dict[str, Any]:
-    """Format an entity edge into a minimal result (uuid, name, fact only)."""
-    return {
-        'uuid': edge.uuid,
-        'name': edge.name,
-        'fact': edge.fact,
-    }
+def format_fact_result(edge: EntityEdge, *, minimal: bool = False) -> dict[str, Any]:
+    """Format an entity edge for MCP output."""
+    if minimal:
+        return {
+            'uuid': edge.uuid,
+            'name': edge.name,
+            'fact': edge.fact,
+        }
+
+    result = edge.model_dump(
+        mode='json',
+        exclude={
+            'fact_embedding',
+        },
+    )
+    return compact_value(result)
 
 
 def format_episode_result(

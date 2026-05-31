@@ -13,6 +13,9 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import parse_qs, urlparse
 
+import graphiti_core.graphiti as _graphiti_core
+import graphiti_core.search.search_utils as _search_utils
+import graphiti_core.utils.maintenance.node_operations as _node_ops
 from dotenv import load_dotenv
 from graphiti_core import Graphiti
 from graphiti_core.edges import EntityEdge
@@ -87,6 +90,7 @@ else:
 # DEFAULT: 10 (suitable for OpenAI Tier 3, mid-tier Anthropic)
 SEMAPHORE_LIMIT = int(os.getenv('SEMAPHORE_LIMIT', 10))
 
+
 def _env_int(name: str, default: int, minimum: int = 1) -> int:
     raw_value = os.getenv(name)
     if raw_value is None:
@@ -138,20 +142,18 @@ logging.getLogger('mcp.server.streamable_http_manager').setLevel(
 # Without this, extraction prompts grow past model context windows (~200K).
 # GRAPHITI_RELEVANT_SCHEMA_LIMIT env var (default: 1) controls previous episodes.
 # GRAPHITI_NODE_DEDUP_LIMIT    env var (default: 3) controls dedup candidates.
-_schema_limit = int(os.getenv('GRAPHITI_RELEVANT_SCHEMA_LIMIT', '1'))
-_dedup_limit = int(os.getenv('GRAPHITI_NODE_DEDUP_LIMIT', '3'))
-
-import graphiti_core.search.search_utils as _search_utils
-import graphiti_core.graphiti as _graphiti_core
+_schema_limit = _env_int('GRAPHITI_RELEVANT_SCHEMA_LIMIT', 1)
+_dedup_limit = _env_int('GRAPHITI_NODE_DEDUP_LIMIT', 3)
 _search_utils.RELEVANT_SCHEMA_LIMIT = _schema_limit
 _graphiti_core.RELEVANT_SCHEMA_LIMIT = _schema_limit
-
-import graphiti_core.utils.maintenance.node_operations as _node_ops
 _node_ops.NODE_DEDUP_CANDIDATE_LIMIT = _dedup_limit
 
 logger = logging.getLogger(__name__)
-logger.info('RELEVANT_SCHEMA_LIMIT=%d NODE_DEDUP_CANDIDATE_LIMIT=%d',
-            _schema_limit, _dedup_limit)
+logger.info(
+    'RELEVANT_SCHEMA_LIMIT=%d NODE_DEDUP_CANDIDATE_LIMIT=%d',
+    _schema_limit,
+    _dedup_limit,
+)
 
 
 # Patch uvicorn's logging config to use our format
@@ -654,7 +656,7 @@ async def search_nodes(
         if not nodes:
             return NodeSearchResponse(message='No relevant nodes found', nodes=[])
 
-        node_results = [format_node_result(node) for node in nodes]
+        node_results = [format_node_result(node, minimal=True) for node in nodes]
 
         return NodeSearchResponse(message='Nodes retrieved successfully', nodes=node_results)
     except Exception as e:
@@ -707,7 +709,7 @@ async def search_memory_facts(
         if not relevant_edges:
             return FactSearchResponse(message='No relevant facts found', facts=[])
 
-        facts = [format_fact_result(edge) for edge in relevant_edges]
+        facts = [format_fact_result(edge, minimal=True) for edge in relevant_edges]
         return FactSearchResponse(message='Facts retrieved successfully', facts=facts)
     except Exception as e:
         error_msg = str(e)

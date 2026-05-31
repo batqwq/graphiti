@@ -206,7 +206,7 @@ class GeminiEmbedder(EmbedderClient):
                 # Capture batch in closure for retry
                 current_batch = batch
 
-                async def _batch_call():
+                async def _batch_call(current_batch=current_batch):
                     return await self.client.aio.models.embed_content(
                         model=model,
                         contents=current_batch,  # type: ignore[arg-type]  # mypy fails on broad union type
@@ -238,7 +238,7 @@ class GeminiEmbedder(EmbedderClient):
                         # Capture item in closure for retry
                         current_item = item
 
-                        async def _single_call():
+                        async def _single_call(current_item=current_item):
                             return await self.client.aio.models.embed_content(
                                 model=model,
                                 contents=[current_item],  # type: ignore[arg-type]  # mypy fails on broad union type
