@@ -87,7 +87,6 @@ else:
 # DEFAULT: 10 (suitable for OpenAI Tier 3, mid-tier Anthropic)
 SEMAPHORE_LIMIT = int(os.getenv('SEMAPHORE_LIMIT', 10))
 
-
 def _env_int(name: str, default: int, minimum: int = 1) -> int:
     raw_value = os.getenv(name)
     if raw_value is None:
@@ -135,6 +134,25 @@ logging.getLogger('mcp.server.streamable_http_manager').setLevel(
     logging.WARNING
 )  # Reduce MCP noise
 
+# Patch graphiti-core constants to limit prompt context size.
+# Without this, extraction prompts grow past model context windows (~200K).
+# GRAPHITI_RELEVANT_SCHEMA_LIMIT env var (default: 1) controls previous episodes.
+# GRAPHITI_NODE_DEDUP_LIMIT    env var (default: 3) controls dedup candidates.
+_schema_limit = int(os.getenv('GRAPHITI_RELEVANT_SCHEMA_LIMIT', '1'))
+_dedup_limit = int(os.getenv('GRAPHITI_NODE_DEDUP_LIMIT', '3'))
+
+import graphiti_core.search.search_utils as _search_utils
+import graphiti_core.graphiti as _graphiti_core
+_search_utils.RELEVANT_SCHEMA_LIMIT = _schema_limit
+_graphiti_core.RELEVANT_SCHEMA_LIMIT = _schema_limit
+
+import graphiti_core.utils.maintenance.node_operations as _node_ops
+_node_ops.NODE_DEDUP_CANDIDATE_LIMIT = _dedup_limit
+
+logger = logging.getLogger(__name__)
+logger.info('RELEVANT_SCHEMA_LIMIT=%d NODE_DEDUP_CANDIDATE_LIMIT=%d',
+            _schema_limit, _dedup_limit)
+
 
 # Patch uvicorn's logging config to use our format
 def configure_uvicorn_logging():
@@ -148,8 +166,6 @@ def configure_uvicorn_logging():
         uvicorn_logger.addHandler(handler)
         uvicorn_logger.propagate = False
 
-
-logger = logging.getLogger(__name__)
 
 # Create global config instance - will be properly initialized later
 config: GraphitiConfig
