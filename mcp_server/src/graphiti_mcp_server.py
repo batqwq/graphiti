@@ -44,6 +44,11 @@ from services.factories import DatabaseDriverFactory, EmbedderFactory, LLMClient
 from services.kuzu_compat import ensure_kuzu_database_attribute
 from services.oauth_provider import PasswordOAuthProvider
 from services.queue_service import QueueService
+from utils.episodes import (
+    get_episodes_by_created_at,
+    normalize_episode_sort_order,
+    resolve_episode_limit,
+)
 from utils.formatting import (
     DEFAULT_MAX_TEXT_CHARS,
     format_episode_result,
@@ -799,15 +804,25 @@ async def get_entity_edge(uuid: str) -> dict[str, Any] | ErrorResponse:
 @mcp.tool()
 async def get_episodes(
     group_ids: list[str] | None = None,
-    max_episodes: int = 10,
+    max_episodes: int | None = None,
     content_max_chars: int = DEFAULT_MAX_TEXT_CHARS,
+    sort_order: str = 'desc',
+    offset: int = 0,
+    group_id: str | None = None,
+    limit: int | None = None,
+    last_n: int | None = None,
 ) -> EpisodeSearchResponse | ErrorResponse:
     """Get episodes from the graph memory.
 
     Args:
         group_ids: Optional list of group IDs to filter results
+        group_id: Optional single group ID alias for older clients
         max_episodes: Maximum number of episodes to return (default: 10)
         content_max_chars: Maximum preview characters per episode, capped by server settings
+        sort_order: Sort by created_at, either 'asc' or 'desc' (default: desc)
+        offset: Number of sorted episodes to skip before returning results
+        limit: Optional max_episodes alias for older clients
+        last_n: Optional max_episodes alias for older clients
     """
     global graphiti_service
 
@@ -815,7 +830,16 @@ async def get_episodes(
         return ErrorResponse(error='Graphiti service not initialized')
 
     try:
-        max_episodes = _bounded_result_limit(max_episodes, 'max_episodes')
+        requested_max_episodes = resolve_episode_limit(
+            max_episodes=max_episodes,
+            limit=limit,
+            last_n=last_n,
+            default=10,
+        )
+        max_episodes = _bounded_result_limit(requested_max_episodes, 'max_episodes')
+        normalized_sort_order = normalize_episode_sort_order(sort_order)
+        if offset < 0:
+            return ErrorResponse(error='offset must be zero or a positive integer')
         if content_max_chars < 0:
             return ErrorResponse(error='content_max_chars must be zero or a positive integer')
 
@@ -825,17 +849,20 @@ async def get_episodes(
         effective_group_ids = (
             group_ids
             if group_ids is not None
+            else [group_id]
+            if group_id
             else [config.graphiti.group_id]
             if config.graphiti.group_id
             else []
         )
 
-        # Get episodes from the driver directly
-        from graphiti_core.nodes import EpisodicNode
-
         if effective_group_ids:
-            episodes = await EpisodicNode.get_by_group_ids(
-                client.driver, effective_group_ids, limit=max_episodes
+            episodes = await get_episodes_by_created_at(
+                client.driver,
+                effective_group_ids,
+                limit=max_episodes,
+                offset=offset,
+                sort_order=normalized_sort_order,
             )
         else:
             # If no group IDs, we need to use a different approach
