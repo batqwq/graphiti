@@ -86,11 +86,36 @@ class OpenAIGenericClient(LLMClient):
 
         # Override max_tokens to support higher limits for local models
         self.max_tokens = max_tokens
+        base_url = config.base_url or ''
+        self._response_format_mode = (
+            'json_object' if 'api.deepseek.com' in base_url else 'json_schema'
+        )
 
         if client is None:
             self.client = AsyncOpenAI(api_key=config.api_key, base_url=config.base_url)
         else:
             self.client = client
+
+    @staticmethod
+    def _loads_json_result(result: str) -> dict[str, Any]:
+        stripped = result.strip()
+        if stripped.startswith('```'):
+            lines = stripped.splitlines()
+            if lines and lines[0].startswith('```'):
+                lines = lines[1:]
+            if lines and lines[-1].startswith('```'):
+                lines = lines[:-1]
+            stripped = '\n'.join(lines).strip()
+
+        try:
+            return json.loads(stripped)
+        except json.JSONDecodeError:
+            starts = [idx for idx in (stripped.find('{'), stripped.find('[')) if idx >= 0]
+            start = min(starts) if starts else -1
+            end = max(stripped.rfind('}'), stripped.rfind(']'))
+            if start >= 0 and end > start:
+                return json.loads(stripped[start : end + 1])
+            raise
 
     async def _generate_response(
         self,
@@ -107,9 +132,19 @@ class OpenAIGenericClient(LLMClient):
             elif m.role == 'system':
                 openai_messages.append({'role': 'system', 'content': m.content})
         try:
-            # Prepare response format
+            if self._response_format_mode == 'json_object':
+                json_instruction = (
+                    'Return a valid JSON object only. Do not return markdown, prose, or code fences.'
+                )
+                if response_model is not None:
+                    schema = json.dumps(response_model.model_json_schema(), ensure_ascii=False)
+                    json_instruction += f' The JSON object must conform to this schema: {schema}'
+                openai_messages.insert(0, {'role': 'system', 'content': json_instruction})
+
+            # Prepare response format. DeepSeek's OpenAI-compatible endpoint supports
+            # json_object, but currently rejects json_schema.
             response_format: dict[str, Any] = {'type': 'json_object'}
-            if response_model is not None:
+            if response_model is not None and self._response_format_mode == 'json_schema':
                 schema_name = getattr(response_model, '__name__', 'structured_response')
                 json_schema = response_model.model_json_schema()
                 response_format = {
@@ -120,15 +155,17 @@ class OpenAIGenericClient(LLMClient):
                     },
                 }
 
-            response = await self.client.chat.completions.create(
-                model=self.model or DEFAULT_MODEL,
-                messages=openai_messages,
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-                response_format=response_format,  # type: ignore[arg-type]
-            )
+            completion_kwargs: dict[str, Any] = {
+                'model': self.model or DEFAULT_MODEL,
+                'messages': openai_messages,
+                'temperature': self.temperature,
+                'max_tokens': self.max_tokens,
+            }
+            completion_kwargs['response_format'] = response_format
+
+            response = await self.client.chat.completions.create(**completion_kwargs)
             result = response.choices[0].message.content or ''
-            return json.loads(result)
+            return self._loads_json_result(result)
         except openai.RateLimitError as e:
             raise RateLimitError from e
         except Exception as e:
