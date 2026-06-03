@@ -130,11 +130,15 @@ class LLMClientFactory:
 
                 llm_config = CoreLLMConfig(
                     api_key=api_key,
+                    base_url=config.providers.openai.api_url,
                     model=config.model,
                     small_model=small_model,
                     temperature=config.temperature,
                     max_tokens=config.max_tokens,
                 )
+
+                if config.providers.openai.api_url.rstrip('/') != 'https://api.openai.com/v1':
+                    return OpenAIGenericClient(config=llm_config, max_tokens=config.max_tokens)
 
                 # Check if this is a reasoning model (o1, o3, gpt-5 family)
                 reasoning_prefixes = ('o1', 'o3', 'gpt-5')
