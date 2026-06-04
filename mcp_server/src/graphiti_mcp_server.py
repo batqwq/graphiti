@@ -253,7 +253,7 @@ def create_auth_components() -> tuple[AuthSettings | None, PasswordOAuthProvider
             default_scopes=scopes,
         ),
         revocation_options=RevocationOptions(enabled=True),
-        required_scopes=[],
+        required_scopes=scopes,
     )
     return auth_settings, auth_provider
 
