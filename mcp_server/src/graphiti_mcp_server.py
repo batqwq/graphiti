@@ -10,7 +10,7 @@ import os
 import sys
 from html import escape
 from pathlib import Path
-from typing import Any, Optional
+from typing import Annotated, Any, Optional
 from urllib.parse import parse_qs, urlparse
 
 import graphiti_core.graphiti as _graphiti_core
@@ -25,7 +25,8 @@ from graphiti_core.utils.maintenance.graph_data_operations import clear_data
 from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions, RevocationOptions
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
-from pydantic import BaseModel
+from mcp.types import ToolAnnotations
+from pydantic import BaseModel, Field
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 
@@ -179,34 +180,115 @@ config: GraphitiConfig
 
 # MCP server instructions
 GRAPHITI_MCP_INSTRUCTIONS = """
-Graphiti is a memory service for AI agents built on a knowledge graph. Graphiti performs well
-with dynamic data such as user interactions, changing enterprise data, and external information.
+Graphiti is a persistent knowledge-graph memory service. It stores source episodes, extracts entity nodes,
+and derives relationship facts. Every item belongs to a group_id partition. Keep one stable group_id for one
+knowledge domain and always pass it when known; unrelated groups must not be mixed.
 
-Graphiti transforms information into a richly connected knowledge network, allowing you to 
-capture relationships between concepts, entities, and information. The system organizes data as episodes 
-(content snippets), nodes (entities), and facts (relationships between entities), creating a dynamic, 
-queryable memory store that evolves with new information. Graphiti supports multiple data formats, including 
-structured JSON data, enabling seamless integration with existing data pipelines and systems.
+Reading workflow:
+1. Use search_memory_facts first for factual, relational, or temporal questions.
+2. Use search_nodes to discover entities, inspect summaries, or obtain a node UUID for a centered fact search.
+3. Use get_entity_edge to inspect one returned fact in detail.
+4. Use get_episodes to inspect source episodes, provenance, or locate an episode UUID.
+5. An empty search result is not proof that no memory exists. Try a more specific query, verify group_ids, and
+   check get_memory_queue_status before concluding that information is absent.
 
-Facts contain temporal metadata, allowing you to track the time of creation and whether a fact is invalid 
-(superseded by new information).
+Writing workflow:
+1. Use add_memory for new source material. Write one coherent episode with explicit entity names, relationships,
+   dates, and uncertainty. Avoid ambiguous pronouns and keyword-only fragments.
+2. add_memory only queues work. Poll get_memory_queue_status until pending=0 and processing=0, then search to
+   verify extraction. Report failed jobs instead of claiming completion.
+3. Graphiti has no in-place update tool. To correct data, locate the exact episode or fact UUID, delete only the
+   incorrect item when appropriate, add a corrected episode, wait for processing, and verify again.
 
-Key capabilities:
-1. Add episodes (text, messages, or JSON) to the knowledge graph with the add_memory tool
-2. Search for nodes (entities) in the graph using natural language queries with search_nodes
-3. Find relevant facts (relationships between entities) with search_facts
-4. Retrieve specific entity edges or episodes by UUID
-5. Manage the knowledge graph with tools like delete_episode, delete_entity_edge, and clear_graph
-
-The server connects to a database for persistent storage and uses language models for certain operations. 
-Each piece of information is organized by group_id, allowing you to maintain separate knowledge domains.
-
-When adding information, provide descriptive names and detailed content to improve search quality. 
-When searching, use specific queries and consider filtering by group_id for more relevant results.
-
-For optimal performance, ensure the database is properly configured and accessible, and valid 
-API keys are provided for any language model operations.
+Deletion rules:
+- Never guess UUIDs. Obtain them from search_memory_facts, get_entity_edge, or get_episodes.
+- delete_episode removes the source episode but may not remove every previously derived node, fact, or summary.
+- delete_entity_edge removes one derived relationship fact but not its source episode.
+- clear_graph is an irreversible group-level reset. Use it only after explicit user authorization.
 """
+
+
+ADD_MEMORY_DESCRIPTION = """
+Queue one source episode for asynchronous extraction into the knowledge graph.
+
+Use this tool to add new evidence or a corrected source statement. Provide one coherent episode with explicit
+entity names, relationships, dates, and uncertainty; do not submit keyword fragments. Reuse the same group_id
+for the same knowledge domain. The response only confirms that the episode was queued, not that nodes and facts
+were created. After calling this tool, poll get_memory_queue_status until the group has no pending or processing
+jobs, then verify with search_memory_facts and search_nodes.
+""".strip()
+
+QUEUE_STATUS_DESCRIPTION = """
+Inspect asynchronous memory-ingestion progress without modifying the graph.
+
+Call this after add_memory and before validating newly written memories. A group is caught up only when pending
+and processing are both zero. Any failed count or last_error must be reported and investigated; do not claim
+that an import completed successfully while failures remain.
+""".strip()
+
+SEARCH_NODES_DESCRIPTION = """
+Search entity nodes by natural-language meaning, name, aliases, summary, and optional entity type.
+
+Use this for entity discovery, identity lookup, summary inspection, or obtaining a node UUID to pass as
+center_node_uuid to search_memory_facts. For answering relationship or factual questions, prefer
+search_memory_facts. Node summaries are generated context and may be incomplete or stale, so verify critical
+claims against facts or source episodes. Empty results are not proof of absence.
+""".strip()
+
+SEARCH_FACTS_DESCRIPTION = """
+Search derived relationship facts using a specific natural-language question.
+
+This is the primary retrieval tool for factual, relational, and temporal questions. Include the relevant entity
+names, relationship, and time constraint in the query, and pass group_ids whenever known. Use center_node_uuid
+only after obtaining an exact node UUID from search_nodes. Results are relevance-ranked rather than guaranteed
+complete; inspect an important fact with get_entity_edge and consult source episodes when provenance matters.
+""".strip()
+
+DELETE_EDGE_DESCRIPTION = """
+Permanently delete exactly one derived relationship fact identified by its UUID.
+
+Use only after locating the exact fact with search_memory_facts and, for important deletions, verifying it with
+get_entity_edge. Never guess a UUID. This does not delete the source episode or connected entity nodes, and a
+source episode may cause similar facts to exist or be derived again.
+""".strip()
+
+DELETE_EPISODE_DESCRIPTION = """
+Permanently delete exactly one source episode identified by its UUID.
+
+Use get_episodes to locate and verify the episode first; never guess a UUID. Deleting an episode removes that
+source record and its direct links, but it does not guarantee removal of every node, derived fact, or generated
+summary previously influenced by the episode. Delete incorrect derived facts separately when necessary.
+""".strip()
+
+GET_EDGE_DESCRIPTION = """
+Retrieve the full stored representation of one relationship fact by UUID without modifying memory.
+
+Use a UUID returned by search_memory_facts. This tool is appropriate for inspecting provenance, temporal fields,
+attributes, and the exact fact before deletion or before relying on it in a high-confidence answer.
+""".strip()
+
+GET_EPISODES_DESCRIPTION = """
+List raw source episodes from one or more groups in deterministic created_at order.
+
+Use this for provenance review, recent-history inspection, pagination, or locating an episode UUID before
+delete_episode. This is not semantic search; use search_memory_facts or search_nodes to find information by
+meaning. group_ids is preferred; group_id, limit, and last_n exist only as compatibility aliases.
+""".strip()
+
+CLEAR_GRAPH_DESCRIPTION = """
+Irreversibly delete all graph data in the specified group partitions.
+
+This is a destructive reset, not a cleanup or correction tool. Use only when the user explicitly requests a
+group reset and the intended group_ids have been verified. If group_ids is omitted, the server's default group
+is cleared. This tool does not create a backup and cannot be undone.
+""".strip()
+
+GET_STATUS_DESCRIPTION = """
+Check whether the MCP service is initialized and can query its graph database.
+
+Use this for connectivity diagnostics only. A healthy result does not mean ingestion queues are empty, memories
+exist, searches are accurate, or external LLM and embedding providers are functioning for new writes.
+""".strip()
 
 oauth_provider: PasswordOAuthProvider | None = None
 
@@ -503,53 +585,70 @@ class GraphitiService:
         return self.client
 
 
-@mcp.tool()
+@mcp.tool(
+    title='Add memory episode',
+    description=ADD_MEMORY_DESCRIPTION,
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=False,
+    ),
+)
 async def add_memory(
-    name: str,
-    episode_body: str,
-    group_id: str | None = None,
-    source: str = 'text',
-    source_description: str = '',
-    uuid: str | None = None,
+    name: Annotated[
+        str,
+        Field(
+            description='Short, descriptive title for this source episode. Use a stable topic or event name.'
+        ),
+    ],
+    episode_body: Annotated[
+        str,
+        Field(
+            description=(
+                'Complete source content to ingest. Use explicit names, relationships, dates, and uncertainty. '
+                "When source='json', provide a valid JSON-encoded string rather than an object."
+            )
+        ),
+    ],
+    group_id: Annotated[
+        str | None,
+        Field(
+            description=(
+                'Exact knowledge-domain partition for this episode. Reuse one stable group_id for related '
+                'memories. Omit only when the server default group is intended.'
+            )
+        ),
+    ] = None,
+    source: Annotated[
+        str,
+        Field(
+            description=(
+                "Episode source format: 'text' for prose, 'json' for a JSON-encoded string, or 'message' for "
+                'conversation-style content.'
+            )
+        ),
+    ] = 'text',
+    source_description: Annotated[
+        str,
+        Field(
+            description=(
+                'Brief provenance description, such as the document type or conversation context. This helps '
+                'future source review.'
+            )
+        ),
+    ] = '',
+    uuid: Annotated[
+        str | None,
+        Field(
+            description=(
+                'Optional caller-supplied episode UUID. Normally omit it. If supplied, it must uniquely and '
+                'stably identify this source episode.'
+            )
+        ),
+    ] = None,
 ) -> SuccessResponse | ErrorResponse:
-    """Add an episode to memory. This is the primary way to add information to the graph.
-
-    This function returns immediately and processes the episode addition in the background.
-    Episodes for the same group_id are processed sequentially to avoid race conditions.
-
-    Args:
-        name (str): Name of the episode
-        episode_body (str): The content of the episode to persist to memory. When source='json', this must be a
-                           properly escaped JSON string, not a raw Python dictionary. The JSON data will be
-                           automatically processed to extract entities and relationships.
-        group_id (str, optional): A unique ID for this graph. If not provided, uses the default group_id from CLI
-                                 or a generated one.
-        source (str, optional): Source type, must be one of:
-                               - 'text': For plain text content (default)
-                               - 'json': For structured data
-                               - 'message': For conversation-style content
-        source_description (str, optional): Description of the source
-        uuid (str, optional): Optional UUID for the episode
-
-    Examples:
-        # Adding plain text content
-        add_memory(
-            name="Company News",
-            episode_body="Acme Corp announced a new product line today.",
-            source="text",
-            source_description="news article",
-            group_id="some_arbitrary_string"
-        )
-
-        # Adding structured JSON data
-        # NOTE: episode_body should be a JSON string (standard JSON escaping)
-        add_memory(
-            name="Customer Profile",
-            episode_body='{"company": {"name": "Acme Technologies"}, "products": [{"id": "P001", "name": "CloudSync"}, {"id": "P002", "name": "DataMiner"}]}',
-            source="json",
-            source_description="CRM data"
-        )
-    """
+    """Queue a source episode for asynchronous graph extraction."""
     global graphiti_service, queue_service
 
     if graphiti_service is None or queue_service is None:
@@ -589,16 +688,27 @@ async def add_memory(
         return ErrorResponse(error=f'Error queuing episode: {error_msg}')
 
 
-@mcp.tool()
-async def get_memory_queue_status(group_id: str | None = None) -> QueueStatusResponse | ErrorResponse:
-    """Get background graph-building progress for queued memories.
-
-    Use this after add_memory when recent memories do not appear in search results yet. A group is fully
-    caught up when pending is 0 and processing is 0.
-
-    Args:
-        group_id: Optional memory group to inspect. If omitted, returns all known queue groups.
-    """
+@mcp.tool(
+    title='Get memory queue status',
+    description=QUEUE_STATUS_DESCRIPTION,
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    ),
+)
+async def get_memory_queue_status(
+    group_id: Annotated[
+        str | None,
+        Field(
+            description=(
+                'Exact group to inspect. Omit to return status for every queue group known to this server.'
+            )
+        ),
+    ] = None,
+) -> QueueStatusResponse | ErrorResponse:
+    """Return background graph-building progress."""
     global queue_service
 
     if queue_service is None:
@@ -607,21 +717,52 @@ async def get_memory_queue_status(group_id: str | None = None) -> QueueStatusRes
     return queue_service.get_queue_status(group_id)
 
 
-@mcp.tool()
+@mcp.tool(
+    title='Search entity nodes',
+    description=SEARCH_NODES_DESCRIPTION,
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    ),
+)
 async def search_nodes(
-    query: str,
-    group_ids: list[str] | None = None,
-    max_nodes: int = 10,
-    entity_types: list[str] | None = None,
+    query: Annotated[
+        str,
+        Field(
+            description=(
+                'Specific natural-language entity lookup. Include a canonical name, alias, role, or identifying '
+                'context instead of isolated generic keywords.'
+            )
+        ),
+    ],
+    group_ids: Annotated[
+        list[str] | None,
+        Field(
+            description=(
+                'Exact knowledge-domain partitions to search. Omit only to search the server default group.'
+            )
+        ),
+    ] = None,
+    max_nodes: Annotated[
+        int,
+        Field(
+            description=(
+                'Maximum number of ranked nodes to return. Must be positive and is capped by the server.'
+            )
+        ),
+    ] = 10,
+    entity_types: Annotated[
+        list[str] | None,
+        Field(
+            description=(
+                'Optional exact configured entity labels to include. Omit when the labels are unknown.'
+            )
+        ),
+    ] = None,
 ) -> NodeSearchResponse | ErrorResponse:
-    """Search for nodes in the graph memory.
-
-    Args:
-        query: The search query
-        group_ids: Optional list of group IDs to filter results
-        max_nodes: Maximum number of nodes to return (default: 10)
-        entity_types: Optional list of entity type names to filter by
-    """
+    """Search entity nodes using hybrid retrieval."""
     global graphiti_service
 
     if graphiti_service is None:
@@ -670,21 +811,53 @@ async def search_nodes(
         return ErrorResponse(error=f'Error searching nodes: {error_msg}')
 
 
-@mcp.tool()
+@mcp.tool(
+    title='Search memory facts',
+    description=SEARCH_FACTS_DESCRIPTION,
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    ),
+)
 async def search_memory_facts(
-    query: str,
-    group_ids: list[str] | None = None,
-    max_facts: int = 10,
-    center_node_uuid: str | None = None,
+    query: Annotated[
+        str,
+        Field(
+            description=(
+                'Specific natural-language question describing the entities, relationship, and relevant time '
+                'constraint. Prefer a complete question over a bag of keywords.'
+            )
+        ),
+    ],
+    group_ids: Annotated[
+        list[str] | None,
+        Field(
+            description=(
+                'Exact knowledge-domain partitions to search. Omit only to search the server default group.'
+            )
+        ),
+    ] = None,
+    max_facts: Annotated[
+        int,
+        Field(
+            description=(
+                'Maximum number of ranked facts to return. Must be positive and is capped by the server.'
+            )
+        ),
+    ] = 10,
+    center_node_uuid: Annotated[
+        str | None,
+        Field(
+            description=(
+                'Optional exact entity-node UUID from search_nodes used to constrain retrieval around that '
+                'entity. Do not pass an entity name or guessed UUID.'
+            )
+        ),
+    ] = None,
 ) -> FactSearchResponse | ErrorResponse:
-    """Search the graph memory for relevant facts.
-
-    Args:
-        query: The search query
-        group_ids: Optional list of group IDs to filter results
-        max_facts: Maximum number of facts to return (default: 10)
-        center_node_uuid: Optional UUID of a node to center the search around
-    """
+    """Search derived relationship facts."""
     global graphiti_service
 
     if graphiti_service is None:
@@ -722,13 +895,28 @@ async def search_memory_facts(
         return ErrorResponse(error=f'Error searching facts: {error_msg}')
 
 
-@mcp.tool()
-async def delete_entity_edge(uuid: str) -> SuccessResponse | ErrorResponse:
-    """Delete an entity edge from the graph memory.
-
-    Args:
-        uuid: UUID of the entity edge to delete
-    """
+@mcp.tool(
+    title='Delete relationship fact',
+    description=DELETE_EDGE_DESCRIPTION,
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=True,
+        openWorldHint=False,
+    ),
+)
+async def delete_entity_edge(
+    uuid: Annotated[
+        str,
+        Field(
+            description=(
+                'Exact relationship-fact UUID returned by search_memory_facts and preferably verified with '
+                'get_entity_edge.'
+            )
+        ),
+    ],
+) -> SuccessResponse | ErrorResponse:
+    """Delete one relationship fact by UUID."""
     global graphiti_service
 
     if graphiti_service is None:
@@ -748,13 +936,23 @@ async def delete_entity_edge(uuid: str) -> SuccessResponse | ErrorResponse:
         return ErrorResponse(error=f'Error deleting entity edge: {error_msg}')
 
 
-@mcp.tool()
-async def delete_episode(uuid: str) -> SuccessResponse | ErrorResponse:
-    """Delete an episode from the graph memory.
-
-    Args:
-        uuid: UUID of the episode to delete
-    """
+@mcp.tool(
+    title='Delete source episode',
+    description=DELETE_EPISODE_DESCRIPTION,
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=True,
+        openWorldHint=False,
+    ),
+)
+async def delete_episode(
+    uuid: Annotated[
+        str,
+        Field(description='Exact source-episode UUID returned and verified by get_episodes.'),
+    ],
+) -> SuccessResponse | ErrorResponse:
+    """Delete one source episode by UUID."""
     global graphiti_service
 
     if graphiti_service is None:
@@ -774,13 +972,23 @@ async def delete_episode(uuid: str) -> SuccessResponse | ErrorResponse:
         return ErrorResponse(error=f'Error deleting episode: {error_msg}')
 
 
-@mcp.tool()
-async def get_entity_edge(uuid: str) -> dict[str, Any] | ErrorResponse:
-    """Get an entity edge from the graph memory by its UUID.
-
-    Args:
-        uuid: UUID of the entity edge to retrieve
-    """
+@mcp.tool(
+    title='Get relationship fact',
+    description=GET_EDGE_DESCRIPTION,
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    ),
+)
+async def get_entity_edge(
+    uuid: Annotated[
+        str,
+        Field(description='Exact relationship-fact UUID returned by search_memory_facts.'),
+    ],
+) -> dict[str, Any] | ErrorResponse:
+    """Retrieve one full relationship fact by UUID."""
     global graphiti_service
 
     if graphiti_service is None:
@@ -801,29 +1009,78 @@ async def get_entity_edge(uuid: str) -> dict[str, Any] | ErrorResponse:
         return ErrorResponse(error=f'Error getting entity edge: {error_msg}')
 
 
-@mcp.tool()
+@mcp.tool(
+    title='List source episodes',
+    description=GET_EPISODES_DESCRIPTION,
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    ),
+)
 async def get_episodes(
-    group_ids: list[str] | None = None,
-    max_episodes: int | None = None,
-    content_max_chars: int = DEFAULT_MAX_TEXT_CHARS,
-    sort_order: str = 'desc',
-    offset: int = 0,
-    group_id: str | None = None,
-    limit: int | None = None,
-    last_n: int | None = None,
+    group_ids: Annotated[
+        list[str] | None,
+        Field(
+            description=(
+                'Preferred group filter. Exact knowledge-domain partitions to list. Takes precedence over the '
+                'legacy group_id argument.'
+            )
+        ),
+    ] = None,
+    max_episodes: Annotated[
+        int | None,
+        Field(
+            description=(
+                'Preferred page-size argument. Must be positive and is capped by the server. Do not combine '
+                'with disagreeing limit or last_n values.'
+            )
+        ),
+    ] = None,
+    content_max_chars: Annotated[
+        int,
+        Field(
+            description=(
+                'Maximum preview characters per episode. Use zero to omit content previews; the server caps '
+                'large values.'
+            )
+        ),
+    ] = DEFAULT_MAX_TEXT_CHARS,
+    sort_order: Annotated[
+        str,
+        Field(description="Created-at order: 'desc' for newest first or 'asc' for oldest first."),
+    ] = 'desc',
+    offset: Annotated[
+        int,
+        Field(description='Number of sorted episodes to skip for pagination. Must be zero or positive.'),
+    ] = 0,
+    group_id: Annotated[
+        str | None,
+        Field(
+            description=(
+                'Legacy single-group alias. Prefer group_ids. Used only when group_ids is omitted.'
+            )
+        ),
+    ] = None,
+    limit: Annotated[
+        int | None,
+        Field(
+            description=(
+                'Legacy page-size alias. Prefer max_episodes. Must not disagree with max_episodes or last_n.'
+            )
+        ),
+    ] = None,
+    last_n: Annotated[
+        int | None,
+        Field(
+            description=(
+                'Legacy page-size alias. Prefer max_episodes. Must not disagree with max_episodes or limit.'
+            )
+        ),
+    ] = None,
 ) -> EpisodeSearchResponse | ErrorResponse:
-    """Get episodes from the graph memory.
-
-    Args:
-        group_ids: Optional list of group IDs to filter results
-        group_id: Optional single group ID alias for older clients
-        max_episodes: Maximum number of episodes to return (default: 10)
-        content_max_chars: Maximum preview characters per episode, capped by server settings
-        sort_order: Sort by created_at, either 'asc' or 'desc' (default: desc)
-        offset: Number of sorted episodes to skip before returning results
-        limit: Optional max_episodes alias for older clients
-        last_n: Optional max_episodes alias for older clients
-    """
+    """List source episodes with deterministic pagination."""
     global graphiti_service
 
     if graphiti_service is None:
@@ -889,13 +1146,28 @@ async def get_episodes(
         return ErrorResponse(error=f'Error getting episodes: {error_msg}')
 
 
-@mcp.tool()
-async def clear_graph(group_ids: list[str] | None = None) -> SuccessResponse | ErrorResponse:
-    """Clear all data from the graph for specified group IDs.
-
-    Args:
-        group_ids: Optional list of group IDs to clear. If not provided, clears the default group.
-    """
+@mcp.tool(
+    title='Clear graph groups',
+    description=CLEAR_GRAPH_DESCRIPTION,
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=True,
+        openWorldHint=False,
+    ),
+)
+async def clear_graph(
+    group_ids: Annotated[
+        list[str] | None,
+        Field(
+            description=(
+                'Exact group partitions to erase permanently. Omit only when the explicitly authorized target '
+                "is the server's default group."
+            )
+        ),
+    ] = None,
+) -> SuccessResponse | ErrorResponse:
+    """Permanently clear graph data for selected groups."""
     global graphiti_service
 
     if graphiti_service is None:
@@ -924,9 +1196,18 @@ async def clear_graph(group_ids: list[str] | None = None) -> SuccessResponse | E
         return ErrorResponse(error=f'Error clearing graph: {error_msg}')
 
 
-@mcp.tool()
+@mcp.tool(
+    title='Get server status',
+    description=GET_STATUS_DESCRIPTION,
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    ),
+)
 async def get_status() -> StatusResponse:
-    """Get the status of the Graphiti MCP server and database connection."""
+    """Check MCP service and graph database connectivity."""
     global graphiti_service
 
     if graphiti_service is None:
