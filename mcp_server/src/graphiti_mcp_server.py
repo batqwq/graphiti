@@ -119,6 +119,19 @@ def _bounded_result_limit(value: int, name: str) -> int:
     return min(value, MAX_MCP_RESULTS)
 
 
+def _resolve_group_ids(
+    group_ids: list[str] | None,
+    *,
+    group_id: str | None = None,
+) -> list[str]:
+    """Resolve explicit group filters before falling back to the configured default."""
+    if group_ids is not None:
+        return group_ids
+    if group_id:
+        return [group_id]
+    return [config.graphiti.group_id] if config.graphiti.group_id else []
+
+
 def _env_bool(name: str, default: bool = False) -> bool:
     raw_value = os.getenv(name)
     if raw_value is None:
@@ -150,9 +163,22 @@ logging.getLogger('mcp.server.streamable_http_manager').setLevel(
 # GRAPHITI_NODE_DEDUP_LIMIT    env var (default: 3) controls dedup candidates.
 _schema_limit = _env_int('GRAPHITI_RELEVANT_SCHEMA_LIMIT', 1)
 _dedup_limit = _env_int('GRAPHITI_NODE_DEDUP_LIMIT', 3)
-_search_utils.RELEVANT_SCHEMA_LIMIT = _schema_limit
-_graphiti_core.RELEVANT_SCHEMA_LIMIT = _schema_limit
-_node_ops.NODE_DEDUP_CANDIDATE_LIMIT = _dedup_limit
+
+
+def _set_required_module_attribute(module: Any, name: str, value: Any) -> None:
+    """Patch a required graphiti-core tuning constant or fail loudly after an upgrade."""
+    if not hasattr(module, name):
+        module_name = getattr(module, '__name__', repr(module))
+        raise RuntimeError(
+            f'Required graphiti-core tuning constant {module_name}.{name} is missing. '
+            'Review the installed graphiti-core version before starting the MCP server.'
+        )
+    setattr(module, name, value)
+
+
+_set_required_module_attribute(_search_utils, 'RELEVANT_SCHEMA_LIMIT', _schema_limit)
+_set_required_module_attribute(_graphiti_core, 'RELEVANT_SCHEMA_LIMIT', _schema_limit)
+_set_required_module_attribute(_node_ops, 'NODE_DEDUP_CANDIDATE_LIMIT', _dedup_limit)
 
 logger = logging.getLogger(__name__)
 logger.info(
@@ -772,14 +798,7 @@ async def search_nodes(
         max_nodes = _bounded_result_limit(max_nodes, 'max_nodes')
         client = await graphiti_service.get_client()
 
-        # Use the provided group_ids or fall back to the default from config if none provided
-        effective_group_ids = (
-            group_ids
-            if group_ids is not None
-            else [config.graphiti.group_id]
-            if config.graphiti.group_id
-            else []
-        )
+        effective_group_ids = _resolve_group_ids(group_ids)
 
         # Create search filters
         search_filters = SearchFilters(
@@ -868,14 +887,7 @@ async def search_memory_facts(
 
         client = await graphiti_service.get_client()
 
-        # Use the provided group_ids or fall back to the default from config if none provided
-        effective_group_ids = (
-            group_ids
-            if group_ids is not None
-            else [config.graphiti.group_id]
-            if config.graphiti.group_id
-            else []
-        )
+        effective_group_ids = _resolve_group_ids(group_ids)
 
         relevant_edges = await client.search(
             group_ids=effective_group_ids,
@@ -1102,16 +1114,7 @@ async def get_episodes(
 
         client = await graphiti_service.get_client()
 
-        # Use the provided group_ids or fall back to the default from config if none provided
-        effective_group_ids = (
-            group_ids
-            if group_ids is not None
-            else [group_id]
-            if group_id
-            else [config.graphiti.group_id]
-            if config.graphiti.group_id
-            else []
-        )
+        effective_group_ids = _resolve_group_ids(group_ids, group_id=group_id)
 
         if effective_group_ids:
             episodes = await get_episodes_by_created_at(
@@ -1174,15 +1177,11 @@ async def clear_graph(
         return ErrorResponse(error='Graphiti service not initialized')
 
     try:
-        client = await graphiti_service.get_client()
-
-        # Use the provided group_ids or fall back to the default from config if none provided
-        effective_group_ids = (
-            group_ids or [config.graphiti.group_id] if config.graphiti.group_id else []
-        )
-
+        effective_group_ids = _resolve_group_ids(group_ids)
         if not effective_group_ids:
             return ErrorResponse(error='No group IDs specified for clearing')
+
+        client = await graphiti_service.get_client()
 
         # Clear data for the specified group IDs
         await clear_data(client.driver, group_ids=effective_group_ids)

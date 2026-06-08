@@ -1,5 +1,7 @@
 """Factory classes for creating LLM, Embedder, and Database clients."""
 
+from urllib.parse import urlparse
+
 from config.schema import (
     DatabaseConfig,
     EmbedderConfig,
@@ -103,6 +105,18 @@ def _validate_api_key(provider_name: str, api_key: str | None, logger) -> str:
     return api_key
 
 
+def _is_official_openai_api_url(api_url: str) -> bool:
+    """Return whether an API URL targets OpenAI's standard v1 endpoint."""
+    parsed = urlparse(api_url)
+    normalized_path = parsed.path.rstrip('/')
+    return (
+        parsed.scheme == 'https'
+        and parsed.hostname == 'api.openai.com'
+        and parsed.port is None
+        and normalized_path in {'', '/v1'}
+    )
+
+
 class LLMClientFactory:
     """Factory for creating LLM clients based on configuration."""
 
@@ -136,8 +150,9 @@ class LLMClientFactory:
                     temperature=config.temperature,
                     max_tokens=config.max_tokens,
                 )
+                llm_config.response_format = config.providers.openai.response_format
 
-                if config.providers.openai.api_url.rstrip('/') != 'https://api.openai.com/v1':
+                if not _is_official_openai_api_url(config.providers.openai.api_url):
                     return OpenAIGenericClient(config=llm_config, max_tokens=config.max_tokens)
 
                 # Check if this is a reasoning model (o1, o3, gpt-5 family)

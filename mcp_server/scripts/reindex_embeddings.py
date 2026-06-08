@@ -32,14 +32,37 @@ PROPERTY_NAME_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
 
 
 def _ordered_response_embeddings(data: dict[str, Any], expected_count: int) -> list[list[float]]:
-    response_items = data['data']
+    if not isinstance(data, dict):
+        raise RuntimeError(
+            f'Embedding provider returned {type(data).__name__}; expected a JSON object with a data array'
+        )
+    response_items = data.get('data')
+    if not isinstance(response_items, list):
+        raise RuntimeError('Embedding provider response is missing the required data array')
     if len(response_items) != expected_count:
         raise RuntimeError(
-            f'OpenRouter returned {len(response_items)} embeddings for {expected_count} inputs'
+            f'Embedding provider returned {len(response_items)} embeddings for {expected_count} inputs'
         )
+    if not all(isinstance(item, dict) for item in response_items):
+        raise RuntimeError('Embedding provider data array must contain JSON objects')
     if all('index' in item for item in response_items):
         response_items = sorted(response_items, key=lambda item: item['index'])
-    return [item['embedding'] for item in response_items]
+        indexes = [item['index'] for item in response_items]
+        if indexes != list(range(expected_count)):
+            raise RuntimeError(
+                f'Embedding provider returned invalid indexes {indexes}; '
+                f'expected {list(range(expected_count))}'
+            )
+
+    embeddings: list[list[float]] = []
+    for position, item in enumerate(response_items):
+        embedding = item.get('embedding')
+        if not isinstance(embedding, list):
+            raise RuntimeError(
+                f'Embedding provider data item {position} is missing a valid embedding array'
+            )
+        embeddings.append(embedding)
+    return embeddings
 
 
 class OpenRouterBatchEmbedder:
@@ -170,10 +193,14 @@ async def _migrate_batch(
         write_query,
         items=items,
     )
-    updated = result[0]['updated_count'] if result else 0
-    if updated != len(items):
+    updated_ids = result[0].get('updated_ids', []) if result else []
+    updated = len(updated_ids)
+    if updated_ids != ids:
+        missing_ids = [item_id for item_id in ids if item_id not in updated_ids]
+        unexpected_ids = [item_id for item_id in updated_ids if item_id not in ids]
         raise RuntimeError(
-            f'{label}: UNWIND count mismatch: updated {updated}, expected {len(items)}'
+            f'{label}: UNWIND update mismatch: updated {updated}, expected {len(items)}; '
+            f'missing elementIds={missing_ids!r}; unexpected elementIds={unexpected_ids!r}'
         )
 
     has_more = len(records) >= batch_size
@@ -256,7 +283,9 @@ UNWIND $items AS item
 {match_clause}
 WHERE elementId({variable}) = item.id
 SET {', '.join(set_clauses)}
-RETURN count({variable}) AS updated_count
+WITH item, {variable}
+ORDER BY item.id
+RETURN collect(elementId({variable})) AS updated_ids
 """
 
 

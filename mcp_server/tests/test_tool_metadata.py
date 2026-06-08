@@ -1,10 +1,12 @@
 """Regression tests for MCP tool discovery metadata."""
 
 import re
+from types import SimpleNamespace
 
 import pytest
 
 import graphiti_mcp_server as server
+from config.schema import GraphitiConfig
 
 EXPECTED_TOOLS = {
     'add_memory',
@@ -98,3 +100,32 @@ def test_server_instructions_reference_real_tools_and_safe_workflows():
     assert 'pending=0 and processing=0' in instructions
     assert 'Never guess UUIDs' in instructions
     assert 'explicit user authorization' in instructions
+
+
+def test_required_monkey_patch_guard_fails_loudly():
+    module = SimpleNamespace(__name__='fake_graphiti_core')
+
+    with pytest.raises(RuntimeError, match='Required graphiti-core tuning constant'):
+        server._set_required_module_attribute(module, 'MISSING_LIMIT', 1)
+
+
+def test_group_resolution_preserves_explicit_empty_list(monkeypatch):
+    config = GraphitiConfig()
+    config.graphiti.group_id = 'default-group'
+    monkeypatch.setattr(server, 'config', config, raising=False)
+
+    assert server._resolve_group_ids(None) == ['default-group']
+    assert server._resolve_group_ids(None, group_id='legacy-group') == ['legacy-group']
+    assert server._resolve_group_ids([]) == []
+
+
+@pytest.mark.asyncio
+async def test_clear_graph_rejects_explicit_empty_group_list(monkeypatch):
+    config = GraphitiConfig()
+    config.graphiti.group_id = 'default-group'
+    monkeypatch.setattr(server, 'config', config, raising=False)
+    monkeypatch.setattr(server, 'graphiti_service', SimpleNamespace())
+
+    result = await server.clear_graph(group_ids=[])
+
+    assert result == {'error': 'No group IDs specified for clearing'}

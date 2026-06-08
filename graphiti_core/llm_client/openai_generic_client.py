@@ -86,9 +86,14 @@ class OpenAIGenericClient(LLMClient):
 
         # Override max_tokens to support higher limits for local models
         self.max_tokens = max_tokens
-        base_url = config.base_url or ''
+        response_format = getattr(config, 'response_format', 'auto').strip().lower()
+        if response_format not in {'auto', 'json_schema', 'json_object'}:
+            raise ValueError(
+                'OpenAI-compatible response_format must be auto, json_schema, or json_object'
+            )
+        self._response_format_auto = response_format == 'auto'
         self._response_format_mode = (
-            'json_object' if 'api.deepseek.com' in base_url else 'json_schema'
+            'json_schema' if self._response_format_auto else response_format
         )
 
         if client is None:
@@ -117,6 +122,31 @@ class OpenAIGenericClient(LLMClient):
                 return json.loads(stripped[start : end + 1])
             raise
 
+    @staticmethod
+    def _json_object_messages(
+        messages: list[ChatCompletionMessageParam],
+        response_model: type[BaseModel] | None,
+    ) -> list[ChatCompletionMessageParam]:
+        json_instruction = 'Return a valid JSON object only. Do not return markdown, prose, or code fences.'
+        if response_model is not None:
+            schema = json.dumps(response_model.model_json_schema(), ensure_ascii=False)
+            json_instruction += f' The JSON object must conform to this schema: {schema}'
+
+        result = [dict(message) for message in messages]
+        for message in result:
+            if message.get('role') == 'system':
+                existing_content = message.get('content') or ''
+                message['content'] = f'{existing_content}\n\n{json_instruction}'.strip()
+                break
+        else:
+            result.insert(0, {'role': 'system', 'content': json_instruction})
+        return typing.cast(list[ChatCompletionMessageParam], result)
+
+    @staticmethod
+    def _supports_json_object_fallback(error: openai.BadRequestError) -> bool:
+        error_text = str(error).lower()
+        return 'json_schema' in error_text or 'response_format' in error_text
+
     async def _generate_response(
         self,
         messages: list[Message],
@@ -126,44 +156,51 @@ class OpenAIGenericClient(LLMClient):
     ) -> dict[str, typing.Any]:
         openai_messages: list[ChatCompletionMessageParam] = []
         for m in messages:
-            m.content = self._clean_input(m.content)
+            cleaned_content = self._clean_input(m.content)
             if m.role == 'user':
-                openai_messages.append({'role': 'user', 'content': m.content})
+                openai_messages.append({'role': 'user', 'content': cleaned_content})
             elif m.role == 'system':
-                openai_messages.append({'role': 'system', 'content': m.content})
+                openai_messages.append({'role': 'system', 'content': cleaned_content})
         try:
-            if self._response_format_mode == 'json_object':
-                json_instruction = (
-                    'Return a valid JSON object only. Do not return markdown, prose, or code fences.'
-                )
-                if response_model is not None:
-                    schema = json.dumps(response_model.model_json_schema(), ensure_ascii=False)
-                    json_instruction += f' The JSON object must conform to this schema: {schema}'
-                openai_messages.insert(0, {'role': 'system', 'content': json_instruction})
+            async def create_completion(response_format_mode: str):
+                request_messages = openai_messages
+                response_format: dict[str, Any] = {'type': 'json_object'}
+                if response_model is not None and response_format_mode == 'json_schema':
+                    schema_name = getattr(response_model, '__name__', 'structured_response')
+                    response_format = {
+                        'type': 'json_schema',
+                        'json_schema': {
+                            'name': schema_name,
+                            'schema': response_model.model_json_schema(),
+                        },
+                    }
+                elif response_format_mode == 'json_object':
+                    request_messages = self._json_object_messages(openai_messages, response_model)
 
-            # Prepare response format. DeepSeek's OpenAI-compatible endpoint supports
-            # json_object, but currently rejects json_schema.
-            response_format: dict[str, Any] = {'type': 'json_object'}
-            if response_model is not None and self._response_format_mode == 'json_schema':
-                schema_name = getattr(response_model, '__name__', 'structured_response')
-                json_schema = response_model.model_json_schema()
-                response_format = {
-                    'type': 'json_schema',
-                    'json_schema': {
-                        'name': schema_name,
-                        'schema': json_schema,
-                    },
+                completion_kwargs: dict[str, Any] = {
+                    'model': self.model or DEFAULT_MODEL,
+                    'messages': request_messages,
+                    'temperature': self.temperature,
+                    'max_tokens': self.max_tokens,
+                    'response_format': response_format,
                 }
+                return await self.client.chat.completions.create(**completion_kwargs)
 
-            completion_kwargs: dict[str, Any] = {
-                'model': self.model or DEFAULT_MODEL,
-                'messages': openai_messages,
-                'temperature': self.temperature,
-                'max_tokens': self.max_tokens,
-            }
-            completion_kwargs['response_format'] = response_format
+            try:
+                response = await create_completion(self._response_format_mode)
+            except openai.BadRequestError as error:
+                if (
+                    not self._response_format_auto
+                    or self._response_format_mode != 'json_schema'
+                    or not self._supports_json_object_fallback(error)
+                ):
+                    raise
+                logger.warning(
+                    'OpenAI-compatible endpoint rejected json_schema; falling back to json_object'
+                )
+                self._response_format_mode = 'json_object'
+                response = await create_completion('json_object')
 
-            response = await self.client.chat.completions.create(**completion_kwargs)
             result = response.choices[0].message.content or ''
             return self._loads_json_result(result)
         except openai.RateLimitError as e:

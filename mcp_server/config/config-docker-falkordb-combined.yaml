@@ -16,6 +16,7 @@ llm:
       api_key: ${OPENAI_API_KEY}
       api_url: ${OPENAI_API_URL:https://api.openai.com/v1}
       organization_id: ${OPENAI_ORGANIZATION_ID:}
+      response_format: ${OPENAI_RESPONSE_FORMAT:auto}
 
     azure_openai:
       api_key: ${AZURE_OPENAI_API_KEY}

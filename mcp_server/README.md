@@ -179,8 +179,11 @@ To use Ollama with the MCP server, configure it as an OpenAI-compatible endpoint
 llm:
   provider: "openai"
   model: "gpt-oss:120b"  # or your preferred Ollama model
-  api_base: "http://localhost:11434/v1"
-  api_key: "ollama"  # dummy key required
+  providers:
+    openai:
+      api_url: "http://localhost:11434/v1"
+      api_key: "ollama"  # dummy key required
+      response_format: "auto"  # auto falls back from json_schema to json_object when needed
 
 embedder:
   provider: "sentence_transformers"  # recommended for local setup
@@ -188,6 +191,12 @@ embedder:
 ```
 
 Make sure Ollama is running locally with: `ollama serve`
+
+For other OpenAI-compatible endpoints, set `OPENAI_API_URL` or `llm.providers.openai.api_url`.
+The standard OpenAI endpoint is detected by parsing `https://api.openai.com/v1`; all other
+endpoints use the compatibility client. Set `OPENAI_RESPONSE_FORMAT=json_object` when a provider
+does not support JSON Schema structured outputs, or leave it as `auto` to try JSON Schema first
+and fall back when the endpoint rejects it.
 
 ### Entity Types
 

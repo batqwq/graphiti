@@ -2,7 +2,7 @@
 
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field
@@ -90,6 +90,7 @@ class OpenAIProviderConfig(BaseModel):
     api_key: str | None = None
     api_url: str = 'https://api.openai.com/v1'
     organization_id: str | None = None
+    response_format: Literal['auto', 'json_schema', 'json_object'] = 'auto'
 
 
 class AzureOpenAIProviderConfig(BaseModel):

@@ -42,6 +42,7 @@ class LLMConfig:
         temperature: float = DEFAULT_TEMPERATURE,
         max_tokens: int = DEFAULT_MAX_TOKENS,
         small_model: str | None = None,
+        response_format: str = 'auto',
     ):
         """
         Initialize the LLMConfig with the provided parameters.
@@ -59,6 +60,10 @@ class LLMConfig:
 
                 small_model (str, optional): The specific LLM model to use for generating responses of simpler prompts.
                                                                 Defaults to "gpt-4.1-nano".
+
+                response_format (str, optional): Structured-output mode for OpenAI-compatible clients.
+                                                Use "json_schema", "json_object", or "auto". In auto mode,
+                                                clients may fall back when json_schema is unsupported.
         """
         self.base_url = base_url
         self.api_key = api_key
@@ -66,3 +71,4 @@ class LLMConfig:
         self.small_model = small_model
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.response_format = response_format
