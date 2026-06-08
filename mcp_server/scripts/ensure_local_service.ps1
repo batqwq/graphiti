@@ -6,6 +6,7 @@ param(
     [string]$RemoteTarget = '',
     [int]$RemotePort = 18004,
     [string]$PublicSseUrl = '',
+    [string]$TunnelTaskName = '',
     [int]$StartupGraceSeconds = 20
 )
 
@@ -177,20 +178,31 @@ if (-not $publicHealthy -and -not $remoteTunnelHealthy -and $RemoteTarget) {
         throw "OpenSSH executable not found: $ssh"
     }
 
-    Start-LoggedProcess `
-        -Name 'ssh-tunnel-watchdog' `
-        -FilePath $ssh `
-        -ArgumentList @(
-            '-N',
-            '-T',
-            '-o', 'BatchMode=yes',
-            '-o', 'ServerAliveInterval=30',
-            '-o', 'ServerAliveCountMax=3',
-            '-o', 'ExitOnForwardFailure=yes',
-            '-R', "127.0.0.1:${RemotePort}:127.0.0.1:${McpPort}",
-            $RemoteTarget
-        ) `
-        -WorkingDirectory $RepoRoot
+    $tunnelTask = if ($TunnelTaskName) {
+        Get-ScheduledTask -TaskName $TunnelTaskName -ErrorAction SilentlyContinue
+    }
+
+    if ($tunnelTask) {
+        Stop-ScheduledTask -TaskName $TunnelTaskName -ErrorAction SilentlyContinue
+        Start-ScheduledTask -TaskName $TunnelTaskName
+    }
+    else {
+        Start-LoggedProcess `
+            -Name 'ssh-tunnel-watchdog' `
+            -FilePath $ssh `
+            -ArgumentList @(
+                '-N',
+                '-T',
+                '-o', 'BatchMode=yes',
+                '-o', 'TCPKeepAlive=yes',
+                '-o', 'ServerAliveInterval=15',
+                '-o', 'ServerAliveCountMax=2',
+                '-o', 'ExitOnForwardFailure=yes',
+                '-R', "127.0.0.1:${RemotePort}:127.0.0.1:${McpPort}",
+                $RemoteTarget
+            ) `
+            -WorkingDirectory $RepoRoot
+    }
 
     Start-Sleep -Seconds 8
     $publicHealthy = Test-PublicSse -Url $PublicSseUrl
