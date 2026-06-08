@@ -27,7 +27,7 @@ from pydantic import BaseModel
 from ..prompts.models import Message
 from .client import LLMClient, get_extraction_language_instruction
 from .config import DEFAULT_MAX_TOKENS, LLMConfig, ModelSize
-from .errors import RateLimitError, RefusalError
+from .errors import EmptyResponseError, RateLimitError, RefusalError
 
 logger = logging.getLogger(__name__)
 
@@ -127,10 +127,23 @@ class OpenAIGenericClient(LLMClient):
         messages: list[ChatCompletionMessageParam],
         response_model: type[BaseModel] | None,
     ) -> list[ChatCompletionMessageParam]:
-        json_instruction = 'Return a valid JSON object only. Do not return markdown, prose, or code fences.'
+        json_instruction = (
+            'Return a valid JSON object only. Do not return markdown, prose, or code fences. '
+            'The response must begin with { and end with }.'
+        )
         if response_model is not None:
             schema = json.dumps(response_model.model_json_schema(), ensure_ascii=False)
-            json_instruction += f' The JSON object must conform to this schema: {schema}'
+            example = json.dumps(
+                OpenAIGenericClient._json_example_from_schema(
+                    response_model.model_json_schema(),
+                ),
+                ensure_ascii=False,
+            )
+            json_instruction += (
+                f'\nThe JSON object must conform to this schema: {schema}'
+                f'\nEXAMPLE JSON OUTPUT SHAPE: {example}'
+                '\nReplace example values with values derived from the input while preserving the JSON shape.'
+            )
 
         result = [dict(message) for message in messages]
         for message in result:
@@ -141,6 +154,80 @@ class OpenAIGenericClient(LLMClient):
         else:
             result.insert(0, {'role': 'system', 'content': json_instruction})
         return typing.cast(list[ChatCompletionMessageParam], result)
+
+    @staticmethod
+    def _json_example_from_schema(
+        schema: dict[str, Any],
+        root_schema: dict[str, Any] | None = None,
+        seen_refs: frozenset[str] = frozenset(),
+        depth: int = 0,
+    ) -> Any:
+        """Build a compact JSON-compatible example from a Pydantic JSON schema."""
+        root_schema = root_schema or schema
+        if depth >= 5:
+            return {}
+
+        if '$ref' in schema:
+            ref = schema['$ref']
+            if ref in seen_refs:
+                return {}
+            target: Any = root_schema
+            for part in ref.removeprefix('#/').split('/'):
+                target = target[part]
+            return OpenAIGenericClient._json_example_from_schema(
+                target,
+                root_schema,
+                seen_refs | {ref},
+                depth + 1,
+            )
+
+        if 'default' in schema:
+            return schema['default']
+        if 'examples' in schema and schema['examples']:
+            return schema['examples'][0]
+        if 'enum' in schema and schema['enum']:
+            return schema['enum'][0]
+
+        for union_key in ('anyOf', 'oneOf'):
+            if union_key in schema:
+                choices = [
+                    choice for choice in schema[union_key] if choice.get('type') != 'null'
+                ]
+                if choices:
+                    return OpenAIGenericClient._json_example_from_schema(
+                        choices[0],
+                        root_schema,
+                        seen_refs,
+                        depth + 1,
+                    )
+
+        schema_type = schema.get('type')
+        if schema_type == 'object' or 'properties' in schema:
+            return {
+                name: OpenAIGenericClient._json_example_from_schema(
+                    value,
+                    root_schema,
+                    seen_refs,
+                    depth + 1,
+                )
+                for name, value in schema.get('properties', {}).items()
+            }
+        if schema_type == 'array':
+            return [
+                OpenAIGenericClient._json_example_from_schema(
+                    schema.get('items', {}),
+                    root_schema,
+                    seen_refs,
+                    depth + 1,
+                )
+            ]
+        if schema_type == 'integer':
+            return 0
+        if schema_type == 'number':
+            return 0.0
+        if schema_type == 'boolean':
+            return False
+        return 'string'
 
     @staticmethod
     def _supports_json_object_fallback(error: openai.BadRequestError) -> bool:
@@ -181,7 +268,7 @@ class OpenAIGenericClient(LLMClient):
                     'model': self.model or DEFAULT_MODEL,
                     'messages': request_messages,
                     'temperature': self.temperature,
-                    'max_tokens': self.max_tokens,
+                    'max_tokens': max_tokens,
                     'response_format': response_format,
                 }
                 return await self.client.chat.completions.create(**completion_kwargs)
@@ -201,7 +288,19 @@ class OpenAIGenericClient(LLMClient):
                 self._response_format_mode = 'json_object'
                 response = await create_completion('json_object')
 
-            result = response.choices[0].message.content or ''
+            choice = response.choices[0]
+            finish_reason = getattr(choice, 'finish_reason', None)
+            result = choice.message.content or ''
+            if finish_reason == 'length':
+                raise ValueError(
+                    f'LLM JSON output was truncated at max_tokens={max_tokens}; '
+                    'retry with a shorter response that remains valid JSON'
+                )
+            if not result.strip():
+                raise EmptyResponseError(
+                    'LLM returned empty content while JSON output was required; '
+                    'retry with a complete valid JSON object'
+                )
             return self._loads_json_result(result)
         except openai.RateLimitError as e:
             raise RateLimitError from e
