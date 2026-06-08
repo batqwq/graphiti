@@ -37,3 +37,11 @@ class EmptyResponseError(Exception):
     def __init__(self, message: str):
         self.message = message
         super().__init__(self.message)
+
+
+class OutputTruncatedError(Exception):
+    """Exception raised when the LLM stops because its output token limit was reached."""
+
+    def __init__(self, message: str):
+        self.message = message
+        super().__init__(self.message)

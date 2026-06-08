@@ -269,7 +269,8 @@ Inspect asynchronous memory-ingestion progress without modifying the graph.
 After add_memory, MUST pass the same explicit group_id used for the write. Omit group_id only when the user
 explicitly requests an administrative overview of every queue. A group is caught up only when pending and
 processing are both zero. Any failed count or last_error must be reported and investigated; never claim that an
-import completed successfully while failures remain.
+import completed successfully while failures remain. The retried count records transient JSON-output failures
+that recovered automatically; report it when diagnosing ingestion reliability.
 """.strip()
 
 SEARCH_NODES_DESCRIPTION = """

@@ -27,7 +27,7 @@ from pydantic import BaseModel
 from ..prompts.models import Message
 from .client import LLMClient, get_extraction_language_instruction
 from .config import DEFAULT_MAX_TOKENS, LLMConfig, ModelSize
-from .errors import EmptyResponseError, RateLimitError, RefusalError
+from .errors import EmptyResponseError, OutputTruncatedError, RateLimitError, RefusalError
 
 logger = logging.getLogger(__name__)
 
@@ -292,7 +292,7 @@ class OpenAIGenericClient(LLMClient):
             finish_reason = getattr(choice, 'finish_reason', None)
             result = choice.message.content or ''
             if finish_reason == 'length':
-                raise ValueError(
+                raise OutputTruncatedError(
                     f'LLM JSON output was truncated at max_tokens={max_tokens}; '
                     'retry with a shorter response that remains valid JSON'
                 )

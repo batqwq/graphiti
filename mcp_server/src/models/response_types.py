@@ -48,6 +48,7 @@ class QueueGroupStatus(TypedDict):
     processing: int
     completed: int
     failed: int
+    retried: int
     worker_running: bool
     idle: bool
     last_started_at: str | None
@@ -61,4 +62,5 @@ class QueueStatusResponse(TypedDict):
     total_processing: int
     total_completed: int
     total_failed: int
+    total_retried: int
     groups: dict[str, QueueGroupStatus]

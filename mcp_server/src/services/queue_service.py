@@ -1,17 +1,22 @@
 """Queue service for managing episode processing."""
 
 import asyncio
+import json
 import logging
 import traceback
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from typing import Any
 
+from graphiti_core.llm_client.errors import EmptyResponseError, OutputTruncatedError
+
 logger = logging.getLogger(__name__)
 
 
 class QueueService:
     """Service for managing sequential episode processing queues by group_id."""
+
+    MAX_EPISODE_ATTEMPTS = 3
 
     def __init__(self):
         """Initialize the queue service."""
@@ -30,6 +35,7 @@ class QueueService:
         self._active_tasks: dict[str, int] = {}
         self._completed_tasks: dict[str, int] = {}
         self._failed_tasks: dict[str, int] = {}
+        self._retried_tasks: dict[str, int] = {}
         self._last_started_at: dict[str, str | None] = {}
         self._last_finished_at: dict[str, str | None] = {}
         self._last_error: dict[str, str | None] = {}
@@ -60,6 +66,7 @@ class QueueService:
             self._active_tasks[group_id] = 0
             self._completed_tasks[group_id] = 0
             self._failed_tasks[group_id] = 0
+            self._retried_tasks[group_id] = 0
             self._last_started_at[group_id] = None
             self._last_finished_at[group_id] = None
             self._last_error[group_id] = None
@@ -199,12 +206,14 @@ class QueueService:
             processing = self._active_tasks.get(current_group_id, 0)
             completed = self._completed_tasks.get(current_group_id, 0)
             failed = self._failed_tasks.get(current_group_id, 0)
+            retried = self._retried_tasks.get(current_group_id, 0)
 
             groups[current_group_id] = {
                 'pending': pending,
                 'processing': processing,
                 'completed': completed,
                 'failed': failed,
+                'retried': retried,
                 'worker_running': self._queue_workers.get(current_group_id, False),
                 'idle': pending == 0 and processing == 0,
                 'last_started_at': self._last_started_at.get(current_group_id),
@@ -216,6 +225,7 @@ class QueueService:
         total_processing = sum(group['processing'] for group in groups.values())
         total_completed = sum(group['completed'] for group in groups.values())
         total_failed = sum(group['failed'] for group in groups.values())
+        total_retried = sum(group['retried'] for group in groups.values())
 
         return {
             'status': 'idle' if total_pending == 0 and total_processing == 0 else 'processing',
@@ -223,6 +233,7 @@ class QueueService:
             'total_processing': total_processing,
             'total_completed': total_completed,
             'total_failed': total_failed,
+            'total_retried': total_retried,
             'groups': groups,
         }
 
@@ -264,29 +275,49 @@ class QueueService:
 
         async def process_episode():
             """Process the episode using the graphiti client."""
-            try:
-                logger.info(f'Processing episode {uuid} for group {group_id}')
+            for attempt in range(1, self.MAX_EPISODE_ATTEMPTS + 1):
+                try:
+                    logger.info(
+                        f'Processing episode {uuid} for group {group_id} '
+                        f'(attempt {attempt}/{self.MAX_EPISODE_ATTEMPTS})'
+                    )
 
-                # Process the episode using the graphiti client
-                await self._graphiti_client.add_episode(
-                    name=name,
-                    episode_body=content,
-                    source_description=source_description,
-                    source=episode_type,
-                    group_id=group_id,
-                    reference_time=datetime.now(timezone.utc),
-                    entity_types=entity_types,
-                    uuid=uuid,
-                )
+                    # Process the episode using the graphiti client
+                    await self._graphiti_client.add_episode(
+                        name=name,
+                        episode_body=content,
+                        source_description=source_description,
+                        source=episode_type,
+                        group_id=group_id,
+                        reference_time=datetime.now(timezone.utc),
+                        entity_types=entity_types,
+                        uuid=uuid,
+                    )
 
-                logger.info(f'Successfully processed episode {uuid} for group {group_id}')
+                    logger.info(f'Successfully processed episode {uuid} for group {group_id}')
+                    return
+                except (json.JSONDecodeError, EmptyResponseError, OutputTruncatedError) as e:
+                    if attempt >= self.MAX_EPISODE_ATTEMPTS:
+                        logger.error(
+                            f'Failed to process episode {uuid} for group {group_id} after '
+                            f'{attempt} attempts: {str(e)}\n{traceback.format_exc()}'
+                        )
+                        raise
 
-            except Exception as e:
-                logger.error(
-                    f'Failed to process episode {uuid} for group {group_id}: {str(e)}\n'
-                    f'{traceback.format_exc()}'
-                )
-                raise
+                    self._retried_tasks[group_id] = self._retried_tasks.get(group_id, 0) + 1
+                    delay = min(2 ** (attempt - 1), 4)
+                    logger.warning(
+                        f'Retrying episode {uuid} for group {group_id} after transient JSON '
+                        f'output error (attempt {attempt}/{self.MAX_EPISODE_ATTEMPTS}, '
+                        f'retry in {delay}s): {e}'
+                    )
+                    await asyncio.sleep(delay)
+                except Exception as e:
+                    logger.error(
+                        f'Failed to process episode {uuid} for group {group_id}: {str(e)}\n'
+                        f'{traceback.format_exc()}'
+                    )
+                    raise
 
         # Use the existing add_episode_task method to queue the processing
         return await self.add_episode_task(group_id, process_episode)
