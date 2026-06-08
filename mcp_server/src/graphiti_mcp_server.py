@@ -207,106 +207,146 @@ config: GraphitiConfig
 # MCP server instructions
 GRAPHITI_MCP_INSTRUCTIONS = """
 Graphiti is a persistent knowledge-graph memory service. It stores source episodes, extracts entity nodes,
-and derives relationship facts. Every item belongs to a group_id partition. Keep one stable group_id for one
-knowledge domain and always pass it when known; unrelated groups must not be mixed.
+and derives relationship facts.
+
+MANDATORY OPERATING RULES:
+- Every group-scoped call MUST explicitly include the exact group_id or group_ids already confirmed by the user
+  or trusted application context. Never guess, invent, rename, substitute, broaden, or silently omit a group.
+  If the group is unknown, ask the user before calling a group-scoped tool.
+- Keep every read, write, verification, correction, and deletion workflow inside the same confirmed group.
+  Never search across groups or create a new group unless the user explicitly instructs you to do so.
+- Treat search results as relevance-ranked candidates, not guaranteed truth. Do not present unrelated results
+  as answers. Verify important claims against a full fact or source episode.
+- Never claim that a write, correction, or deletion succeeded until the relevant follow-up checks pass.
 
 Reading workflow:
-1. Use search_memory_facts first for factual, relational, or temporal questions.
-2. Use search_nodes to discover entities, inspect summaries, or obtain a node UUID for a centered fact search.
+1. Use search_memory_facts first for factual, relational, or temporal questions. Write a focused natural-language
+   question containing the entity, relationship, and relevant time constraint.
+2. Use search_nodes only to discover entities, inspect summaries, or obtain a node UUID for a centered fact
+   search. A node summary is generated context and is not authoritative evidence.
 3. Use get_entity_edge to inspect one returned fact in detail.
 4. Use get_episodes to inspect source episodes, provenance, or locate an episode UUID.
 5. An empty search result is not proof that no memory exists. Try a more specific query, verify group_ids, and
    check get_memory_queue_status before concluding that information is absent.
 
 Writing workflow:
-1. Use add_memory for new source material. Write one coherent episode with explicit entity names, relationships,
-   dates, and uncertainty. Avoid ambiguous pronouns and keyword-only fragments.
+1. Use add_memory only for source material the user wants remembered. Write one coherent episode with explicit
+   entity names, relationships, dates, provenance, and uncertainty. Do not write guesses, inferred conclusions,
+   ambiguous pronouns, keyword-only fragments, or multiple unrelated events in one episode.
 2. add_memory only queues work. Poll get_memory_queue_status until pending=0 and processing=0, then search to
    verify extraction. Report failed jobs instead of claiming completion.
 3. Graphiti has no in-place update tool. To correct data, locate the exact episode or fact UUID, delete only the
    incorrect item when appropriate, add a corrected episode, wait for processing, and verify again.
 
 Deletion rules:
-- Never guess UUIDs. Obtain them from search_memory_facts, get_entity_edge, or get_episodes.
+- Destructive tools require an explicit user request for the exact deletion. Never initiate cleanup, deduplication,
+  rebuilding, or deletion merely because results are noisy, duplicated, stale, or empty.
+- Never guess UUIDs. Obtain and verify them inside the confirmed group using search_memory_facts,
+  get_entity_edge, or get_episodes.
 - delete_episode removes the source episode but may not remove every previously derived node, fact, or summary.
 - delete_entity_edge removes one derived relationship fact but not its source episode.
-- clear_graph is an irreversible group-level reset. Use it only after explicit user authorization.
+- clear_graph is an irreversible group-level reset. Never call it unless the user explicitly names the target
+  group and confirms that all data in that group may be permanently deleted.
 """
 
 
 ADD_MEMORY_DESCRIPTION = """
 Queue one source episode for asynchronous extraction into the knowledge graph.
 
-Use this tool to add new evidence or a corrected source statement. Provide one coherent episode with explicit
-entity names, relationships, dates, and uncertainty; do not submit keyword fragments. Reuse the same group_id
-for the same knowledge domain. The response only confirms that the episode was queued, not that nodes and facts
-were created. After calling this tool, poll get_memory_queue_status until the group has no pending or processing
-jobs, then verify with search_memory_facts and search_nodes.
+MANDATORY: Explicitly pass the exact group_id confirmed by the user or trusted application context. Never omit,
+guess, invent, rename, or substitute the group_id. If it is unknown, do not call this tool; ask the user first.
+
+Add only source material the user wants remembered. Provide one coherent episode with explicit entity names,
+relationships, dates, provenance, and uncertainty. Do not store guesses, inferred conclusions, ambiguous
+pronouns, keyword fragments, or unrelated events combined into one episode. The response confirms only that the
+episode was queued. Poll get_memory_queue_status for the same group until pending=0 and processing=0, report any
+failure, then verify the result with search_memory_facts and search_nodes before claiming the write succeeded.
 """.strip()
 
 QUEUE_STATUS_DESCRIPTION = """
 Inspect asynchronous memory-ingestion progress without modifying the graph.
 
-Call this after add_memory and before validating newly written memories. A group is caught up only when pending
-and processing are both zero. Any failed count or last_error must be reported and investigated; do not claim
-that an import completed successfully while failures remain.
+After add_memory, MUST pass the same explicit group_id used for the write. Omit group_id only when the user
+explicitly requests an administrative overview of every queue. A group is caught up only when pending and
+processing are both zero. Any failed count or last_error must be reported and investigated; never claim that an
+import completed successfully while failures remain.
 """.strip()
 
 SEARCH_NODES_DESCRIPTION = """
 Search entity nodes by natural-language meaning, name, aliases, summary, and optional entity type.
 
-Use this for entity discovery, identity lookup, summary inspection, or obtaining a node UUID to pass as
-center_node_uuid to search_memory_facts. For answering relationship or factual questions, prefer
-search_memory_facts. Node summaries are generated context and may be incomplete or stale, so verify critical
-claims against facts or source episodes. Empty results are not proof of absence.
+MANDATORY: Explicitly pass only the exact group_ids confirmed by the user or trusted application context. Never
+omit, guess, invent, broaden, or search across groups. If the group is unknown, ask the user first.
+
+Use this only for entity discovery, identity lookup, summary inspection, or obtaining a node UUID to pass as
+center_node_uuid to search_memory_facts. For relationship or factual questions, prefer search_memory_facts.
+Use a focused natural-language lookup containing a name, alias, role, or identifying context. Results are
+relevance-ranked candidates. Ignore unrelated results. Node summaries may be incomplete or stale, so verify
+critical claims against facts or source episodes. Empty results are not proof of absence.
 """.strip()
 
 SEARCH_FACTS_DESCRIPTION = """
 Search derived relationship facts using a specific natural-language question.
 
-This is the primary retrieval tool for factual, relational, and temporal questions. Include the relevant entity
-names, relationship, and time constraint in the query, and pass group_ids whenever known. Use center_node_uuid
-only after obtaining an exact node UUID from search_nodes. Results are relevance-ranked rather than guaranteed
-complete; inspect an important fact with get_entity_edge and consult source episodes when provenance matters.
+MANDATORY: Explicitly pass only the exact group_ids confirmed by the user or trusted application context. Never
+omit, guess, invent, broaden, or search across groups. If the group is unknown, ask the user first.
+
+This is the primary retrieval tool for factual, relational, and temporal questions. Query with one focused
+natural-language question that names the relevant entities, relationship, and time constraint. Do not use a bag
+of unrelated keywords. Use center_node_uuid only after obtaining the exact node UUID from search_nodes in the
+same group. Results are relevance-ranked candidates: ignore unrelated results and do not treat rank as proof.
+Inspect important facts with get_entity_edge and consult source episodes when provenance matters.
 """.strip()
 
 DELETE_EDGE_DESCRIPTION = """
 Permanently delete exactly one derived relationship fact identified by its UUID.
 
-Use only after locating the exact fact with search_memory_facts and, for important deletions, verifying it with
-get_entity_edge. Never guess a UUID. This does not delete the source episode or connected entity nodes, and a
-source episode may cause similar facts to exist or be derived again.
+MANDATORY: Call only when the user explicitly requests deletion of this exact fact. Never guess a UUID. First
+locate the fact with search_memory_facts inside the confirmed group and verify the exact UUID and content with
+get_entity_edge. Never delete merely because a result appears duplicated, stale, noisy, or incorrect. This does
+not delete the source episode or connected entity nodes, and a source episode may cause similar facts to exist
+or be derived again. After deletion, search the same group again and report the verified result.
 """.strip()
 
 DELETE_EPISODE_DESCRIPTION = """
 Permanently delete exactly one source episode identified by its UUID.
 
-Use get_episodes to locate and verify the episode first; never guess a UUID. Deleting an episode removes that
-source record and its direct links, but it does not guarantee removal of every node, derived fact, or generated
-summary previously influenced by the episode. Delete incorrect derived facts separately when necessary.
+MANDATORY: Call only when the user explicitly requests deletion of this exact source episode. Use get_episodes
+inside the confirmed group to verify the exact UUID, content, and intended target first; never guess a UUID.
+Never delete merely because search results are duplicated, stale, noisy, or incorrect. Deleting an episode
+removes that source record and its direct links, but it does not guarantee removal of every node, derived fact,
+or generated summary previously influenced by the episode. Verify the result in the same group after deletion.
 """.strip()
 
 GET_EDGE_DESCRIPTION = """
 Retrieve the full stored representation of one relationship fact by UUID without modifying memory.
 
-Use a UUID returned by search_memory_facts. This tool is appropriate for inspecting provenance, temporal fields,
-attributes, and the exact fact before deletion or before relying on it in a high-confidence answer.
+Use only an exact UUID returned by search_memory_facts from the confirmed group; never guess or substitute a
+UUID. Inspect provenance, temporal fields, attributes, and exact fact content before relying on an important
+fact or requesting its deletion.
 """.strip()
 
 GET_EPISODES_DESCRIPTION = """
 List raw source episodes from one or more groups in deterministic created_at order.
 
-Use this for provenance review, recent-history inspection, pagination, or locating an episode UUID before
-delete_episode. This is not semantic search; use search_memory_facts or search_nodes to find information by
-meaning. group_ids is preferred; group_id, limit, and last_n exist only as compatibility aliases.
+MANDATORY: Explicitly pass only the exact group_ids confirmed by the user or trusted application context. Never
+omit, guess, invent, broaden, or list across groups. If the group is unknown, ask the user first.
+
+Use this for provenance review, recent-history inspection, pagination, or locating and verifying an episode UUID
+before delete_episode. This is not semantic search; use search_memory_facts or search_nodes to find information
+by meaning. group_ids is preferred; group_id, limit, and last_n exist only as compatibility aliases.
 """.strip()
 
 CLEAR_GRAPH_DESCRIPTION = """
 Irreversibly delete all graph data in the specified group partitions.
 
-This is a destructive reset, not a cleanup or correction tool. Use only when the user explicitly requests a
-group reset and the intended group_ids have been verified. If group_ids is omitted, the server's default group
-is cleared. This tool does not create a backup and cannot be undone.
+MANDATORY: Never call this tool unless the user explicitly requests the reset, names every target group, and
+confirms that all data in those groups may be permanently deleted.
+Always pass the confirmed group_ids explicitly; never omit, guess, invent, broaden, or substitute them.
+
+This is a destructive reset, not a cleanup, correction, deduplication, migration, or troubleshooting tool. Never
+call it because searches are empty, noisy, duplicated, stale, or incorrect. This tool does not create a backup
+and cannot be undone. After execution, verify only the explicitly authorized groups and report the result.
 """.strip()
 
 GET_STATUS_DESCRIPTION = """
@@ -641,8 +681,8 @@ async def add_memory(
         str | None,
         Field(
             description=(
-                'Exact knowledge-domain partition for this episode. Reuse one stable group_id for related '
-                'memories. Omit only when the server default group is intended.'
+                'MANDATORY for normal use. Exact group explicitly confirmed by the user or trusted application '
+                'context. Never omit, guess, invent, rename, or substitute it. If unknown, ask the user first.'
             )
         ),
     ] = None,
@@ -729,7 +769,8 @@ async def get_memory_queue_status(
         str | None,
         Field(
             description=(
-                'Exact group to inspect. Omit to return status for every queue group known to this server.'
+                'Exact group used by the related write. After add_memory, MUST pass the same group_id. Omit only '
+                'when the user explicitly requests an administrative overview of every queue.'
             )
         ),
     ] = None,
@@ -758,8 +799,8 @@ async def search_nodes(
         str,
         Field(
             description=(
-                'Specific natural-language entity lookup. Include a canonical name, alias, role, or identifying '
-                'context instead of isolated generic keywords.'
+                'One focused natural-language entity lookup. Include a canonical name, alias, role, or '
+                'identifying context. Do not use unrelated keyword lists.'
             )
         ),
     ],
@@ -767,7 +808,8 @@ async def search_nodes(
         list[str] | None,
         Field(
             description=(
-                'Exact knowledge-domain partitions to search. Omit only to search the server default group.'
+                'MANDATORY for normal use. Exact groups explicitly confirmed by the user or trusted application '
+                'context. Never omit, guess, invent, broaden, or search across unconfirmed groups.'
             )
         ),
     ] = None,
@@ -845,8 +887,8 @@ async def search_memory_facts(
         str,
         Field(
             description=(
-                'Specific natural-language question describing the entities, relationship, and relevant time '
-                'constraint. Prefer a complete question over a bag of keywords.'
+                'One focused natural-language question naming the relevant entities, relationship, and time '
+                'constraint. Do not use a bag of unrelated keywords.'
             )
         ),
     ],
@@ -854,7 +896,8 @@ async def search_memory_facts(
         list[str] | None,
         Field(
             description=(
-                'Exact knowledge-domain partitions to search. Omit only to search the server default group.'
+                'MANDATORY for normal use. Exact groups explicitly confirmed by the user or trusted application '
+                'context. Never omit, guess, invent, broaden, or search across unconfirmed groups.'
             )
         ),
     ] = None,
@@ -922,8 +965,8 @@ async def delete_entity_edge(
         str,
         Field(
             description=(
-                'Exact relationship-fact UUID returned by search_memory_facts and preferably verified with '
-                'get_entity_edge.'
+                'Exact relationship-fact UUID returned by search_memory_facts in the confirmed group and '
+                'verified with get_entity_edge. Never guess or substitute a UUID.'
             )
         ),
     ],
@@ -961,7 +1004,12 @@ async def delete_entity_edge(
 async def delete_episode(
     uuid: Annotated[
         str,
-        Field(description='Exact source-episode UUID returned and verified by get_episodes.'),
+        Field(
+            description=(
+                'Exact source-episode UUID returned and verified by get_episodes in the confirmed group. Never '
+                'guess or substitute a UUID.'
+            )
+        ),
     ],
 ) -> SuccessResponse | ErrorResponse:
     """Delete one source episode by UUID."""
@@ -997,7 +1045,12 @@ async def delete_episode(
 async def get_entity_edge(
     uuid: Annotated[
         str,
-        Field(description='Exact relationship-fact UUID returned by search_memory_facts.'),
+        Field(
+            description=(
+                'Exact relationship-fact UUID returned by search_memory_facts in the confirmed group. Never '
+                'guess or substitute a UUID.'
+            )
+        ),
     ],
 ) -> dict[str, Any] | ErrorResponse:
     """Retrieve one full relationship fact by UUID."""
@@ -1036,8 +1089,9 @@ async def get_episodes(
         list[str] | None,
         Field(
             description=(
-                'Preferred group filter. Exact knowledge-domain partitions to list. Takes precedence over the '
-                'legacy group_id argument.'
+                'MANDATORY for normal use. Exact groups explicitly confirmed by the user or trusted application '
+                'context. Never omit, guess, invent, broaden, or list across unconfirmed groups. Takes '
+                'precedence over legacy group_id.'
             )
         ),
     ] = None,
@@ -1071,7 +1125,8 @@ async def get_episodes(
         str | None,
         Field(
             description=(
-                'Legacy single-group alias. Prefer group_ids. Used only when group_ids is omitted.'
+                'Legacy single-group alias. Prefer explicit group_ids. If used, it must be the exact group '
+                'confirmed by the user or trusted application context.'
             )
         ),
     ] = None,
@@ -1164,8 +1219,8 @@ async def clear_graph(
         list[str] | None,
         Field(
             description=(
-                'Exact group partitions to erase permanently. Omit only when the explicitly authorized target '
-                "is the server's default group."
+                'MANDATORY explicit list of every group the user has named and authorized for permanent erasure. '
+                'Never omit, guess, invent, broaden, or substitute group IDs.'
             )
         ),
     ] = None,

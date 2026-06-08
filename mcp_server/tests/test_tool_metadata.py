@@ -83,13 +83,54 @@ async def test_read_only_and_mutating_annotations_are_accurate(tools_by_name):
 @pytest.mark.asyncio
 async def test_descriptions_explain_critical_workflows_and_risks(tools_by_name):
     assert 'get_memory_queue_status' in tools_by_name['add_memory'].description
+    assert 'MANDATORY' in tools_by_name['add_memory'].description
+    assert 'Never omit' in tools_by_name['add_memory'].description
     assert 'primary retrieval tool' in tools_by_name['search_memory_facts'].description
+    assert 'relevance-ranked candidates' in tools_by_name['search_memory_facts'].description
     assert 'prefer' in tools_by_name['search_nodes'].description
     assert 'search_memory_facts' in tools_by_name['search_nodes'].description
+    assert 'Ignore unrelated results' in tools_by_name['search_nodes'].description
     assert 'does not guarantee removal' in tools_by_name['delete_episode'].description
     assert 'Never guess a UUID' in tools_by_name['delete_entity_edge'].description
     assert 'explicitly requests' in tools_by_name['clear_graph'].description
     assert 'cannot be undone' in tools_by_name['clear_graph'].description
+    assert 'Always pass the confirmed group_ids explicitly' in tools_by_name['clear_graph'].description
+
+
+@pytest.mark.asyncio
+async def test_group_scoped_tools_require_explicit_confirmed_groups(tools_by_name):
+    group_parameters = {
+        'add_memory': ('group_id', 'confirmed by the user or trusted application context'),
+        'search_nodes': ('group_ids', 'confirmed by the user or trusted application context'),
+        'search_memory_facts': ('group_ids', 'confirmed by the user or trusted application context'),
+        'get_episodes': ('group_ids', 'confirmed by the user or trusted application context'),
+        'clear_graph': ('group_ids', 'names every target group'),
+    }
+
+    for tool_name, (parameter_name, required_rule) in group_parameters.items():
+        description = tools_by_name[tool_name].description
+        parameter_description = tools_by_name[tool_name].inputSchema['properties'][parameter_name][
+            'description'
+        ]
+
+        assert required_rule in description
+        assert 'MANDATORY' in parameter_description
+        assert 'Never omit' in f'{description}\n{parameter_description}'
+
+
+@pytest.mark.asyncio
+async def test_discovery_metadata_does_not_expose_a_concrete_group_name(tools_by_name):
+    metadata = [server.GRAPHITI_MCP_INSTRUCTIONS]
+    for tool in tools_by_name.values():
+        metadata.append(tool.description)
+        metadata.extend(
+            schema.get('description', '')
+            for schema in tool.inputSchema.get('properties', {}).values()
+        )
+
+    combined_metadata = '\n'.join(metadata)
+
+    assert re.search(r'(?i)\bgroup(?:_id|_ids)\s*(?:=|:)\s*["\[]?[\w-]+', combined_metadata) is None
 
 
 def test_server_instructions_reference_real_tools_and_safe_workflows():
@@ -97,9 +138,12 @@ def test_server_instructions_reference_real_tools_and_safe_workflows():
 
     assert re.search(r'\bsearch_facts\b', instructions) is None
     assert 'search_memory_facts' in instructions
+    assert 'MANDATORY OPERATING RULES' in instructions
+    assert 'Never guess, invent, rename, substitute, broaden, or silently omit a group' in instructions
+    assert 'Never search across groups or create a new group' in instructions
     assert 'pending=0 and processing=0' in instructions
     assert 'Never guess UUIDs' in instructions
-    assert 'explicit user authorization' in instructions
+    assert 'explicitly names the target' in instructions
 
 
 def test_required_monkey_patch_guard_fails_loudly():
